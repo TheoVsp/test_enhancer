@@ -1,0 +1,12 @@
+# Fichiers Python temporaires
+__pycache__/
+*.pyc
+
+# Dossiers générés par le pipeline
+runs/
+_repos/
+
+# Environnements virtuels
+mitacs-env/
+.venv/
+env/

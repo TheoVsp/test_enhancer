@@ -1,0 +1,20 @@
+# Dépendances du pipeline Test Enhancer V1
+#
+# Installe avec :  pip install -r requirements.txt
+
+# Chargement du dataset SWE-bench Lite depuis HuggingFace
+datasets>=2.0.0
+
+# Exécution des tests
+pytest>=7.0.0
+
+# Appel du LLM. On utilise le SDK 'openai', mais en le pointant vers les
+# endpoints OpenAI-compatibles de Google Gemini (voir enhancer.py).
+# Le même SDK fonctionne donc pour OpenAI ET Gemini.
+openai>=1.0.0
+
+# Export Excel du tableau de variables (optionnel mais recommandé)
+openpyxl>=3.0.0
+
+# Mesure de couverture pour l'évaluation (optionnel)
+coverage>=7.0.0
