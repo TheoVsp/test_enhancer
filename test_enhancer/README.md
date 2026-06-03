@@ -1,4 +1,4 @@
-# Test Enhancer Pipeline - V1 (Local Execution)
+# Test Enhancer Pipeline - V1 (Local Execution) (A mettre à jour)
 
 Ce projet implémente un pipeline d'analyse dynamique et de renforcement de tests pour l'évaluation de LLMs sur le dataset **SWE-bench Lite**. 
 
