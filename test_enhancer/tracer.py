@@ -114,7 +114,7 @@ class VariableTracer:
             
         # 4. Ignorer l'infrastructure de test et de setup
         name = p.name.lower()
-        if "test" in name or name in ("setup.py", "conftest.py"):
+        if name in ("setup.py", "conftest.py"):
             return False
             
         return True
