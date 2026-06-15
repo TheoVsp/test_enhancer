@@ -13,6 +13,12 @@ Exemples :
 
     # Tester le pipeline sur l'exemple jouet local (sans Docker, sans SWE-bench)
     python -m test_enhancer.main --demo
+
+    # Lancer le pipeline complet dans Docker (trace + LLM)
+    python -m test_enhancer.main --instance sympy__sympy-20590 --docker
+
+    # Lancer le pipeline dans Docker SANS appel LLM (juste trace + artefacts)
+    python -m test_enhancer.main --instance sympy__sympy-20590 --no-enhance --docker
 """
 from __future__ import annotations
 
