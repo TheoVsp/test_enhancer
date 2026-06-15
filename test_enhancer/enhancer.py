@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from .config import LLM_MODEL, LLM_TEMPERATURE, GEMINI_API_KEY
+from .config import LLM_MODEL, LLM_TEMPERATURE, OPENAI_API_KEY
 
 
 SYSTEM_PROMPT = """You are a software testing expert. Your task is to STRENGTHEN \
@@ -105,10 +105,10 @@ def enhance_tests(
 
     Nécessite la variable d'environnement GEMINI_API_KEY.
     """
-    if not GEMINI_API_KEY:
+    if not OPENAI_API_KEY:
         raise RuntimeError(
-            "GEMINI_API_KEY non défini. Configure ta clé avant de lancer : "
-            "set GEMINI_API_KEY=AIza..."
+            "OPENAI_API_KEY non défini. Configure ta clé avant de lancer : "
+            "set OPENAI_API_KEY="
         )
 
     # Import local pour ne pas exiger openai si on ne fait que tracer.
@@ -116,8 +116,8 @@ def enhance_tests(
 
     # L'astuce est ici : on utilise le client OpenAI, mais on l'envoie chez Google !
     client = OpenAI(
-        api_key=GEMINI_API_KEY,
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+        api_key=OPENAI_API_KEY,
+        base_url="https://api.minimaxi.com/v1"
     )
     
     user_prompt = build_user_prompt(annotated_code, variable_table, existing_tests)

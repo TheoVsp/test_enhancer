@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import artifacts, enhancer, evaluate, swe_runner, validate
+from . import artifacts, enhancer, evaluate, swe_runner, validate, docker_runner
 from .config import WORK_DIR
 from .dataset import Instance, get_instance
 
@@ -34,10 +34,30 @@ def _get_patched_files(patch_text: str) -> list[str]:
     return files
 
 
+def _extract_patch_additions(patch_text: str, target_file: str) -> str:
+    """Extrait uniquement les lignes ajoutées (+) pour un fichier donné dans un patch.
+
+    Utilisé comme fallback quand le fichier de test n'existe pas encore sur disque.
+    Retourne le code brut (sans le '+' de préfixe diff) pour le fichier ciblé.
+    """
+    lines: list[str] = []
+    in_target = False
+    for line in patch_text.splitlines():
+        if line.startswith("+++ b/"):
+            in_target = (line[len("+++ b/"):].strip() == target_file)
+            continue
+        if in_target:
+            if line.startswith("diff ") or line.startswith("--- "):
+                in_target = False
+            elif line.startswith("+") and not line.startswith("+++"):
+                lines.append(line[1:])  # strip the leading '+'
+    return "\n".join(lines)
+
+
 def run_pipeline(
     instance_id: str,
     do_enhance: bool = True,
-    use_agent_patch: bool | None = None,
+    use_docker: bool =False
 ) -> Path:
     """Exécute le pipeline complet sur une instance SWE-bench Lite.
 
@@ -53,8 +73,8 @@ def run_pipeline(
 
     # 1. Charger l'instance
     print("[1] Chargement de l'instance...")
-    instance: Instance = get_instance(instance_id, use_agent_patch=use_agent_patch)
-    patch_kind = "AGENT" if instance.agent_patch.strip() else "GOLD"
+    instance: Instance = get_instance(instance_id)
+    patch_kind = "GOLD"
     print(f"    repo={instance.repo}  #FAIL_TO_PASS={len(instance.fail_to_pass)}  "
           f"patch={patch_kind}")
 
@@ -68,7 +88,10 @@ def run_pipeline(
     print("[3] Exécution des tests FAIL_TO_PASS sous tracer...")
     node_ids = swe_runner.resolve_node_ids(instance.fail_to_pass, instance.test_patch)
     print(f"    node ids résolus : {node_ids}")
-    result = swe_runner.run_tests_traced(repo_dir, node_ids)
+    if use_docker:
+        result= docker_runner.run_tests_traced_docker(instance,node_ids)
+    else:
+        result = swe_runner.run_tests_traced(repo_dir, node_ids)
     
     (out_dir / "run_log.txt").write_text(
         f"success={result.success}\n\n--- STDOUT ---\n{result.stdout}\n"
@@ -88,19 +111,21 @@ def run_pipeline(
 
     # Annoter les fichiers source touchés par la trace
     traced_files = sorted({r.filename for r in rows})
-    patched_names = _get_patched_files(instance.gold_patch)
-    
+    # Use patch_to_apply (agent patch if set, gold patch otherwise) to find
+    # which source files were modified — these are the most relevant for the LLM.
+    patched_names = _get_patched_files(instance.patch_to_apply)
+
     annotated_main = ""
     main_filename = ""
-    
+
     for fpath in traced_files:
         fp = Path(fpath)
         if not fp.exists():
             continue
         out_annotated = out_dir / f"annotated_{fp.name}"
         artifacts.annotate_source(fp, rows, out_annotated)
-        
-        # Priorité : on garde le fichier annoté qui correspond au gold patch
+
+        # Priorité : on garde le fichier annoté qui correspond au patch appliqué
         if fp.name in patched_names and not annotated_main:
             annotated_main = out_annotated.read_text(encoding="utf-8")
             main_filename = fp.name
@@ -116,17 +141,35 @@ def run_pipeline(
     if main_filename:
         print(f"    -> Fichier pertinent sélectionné pour le LLM : {main_filename}")
 
-    # On détermine le chemin relatif du fichier de test original (pour y
-    # placer les tests renforcés au moment de la validation).
-    base_test_path = ""
+    # Collect ALL test files from the test patch (there may be more than one).
+    # We read each one from disk (they were just applied by prepare_repo) so
+    # the LLM sees the actual test source, not the raw diff.
     test_files = swe_runner.extract_test_files(instance.test_patch)
-    if test_files:
-        base_test_path = test_files[0]
+    print(f"    -> Fichiers de test détectés dans le test_patch : {test_files}")
+
+    existing_tests_parts: list[str] = []
+    for tf in test_files:
+        tf_path = repos_root / instance.instance_id / tf
+        if tf_path.exists():
+            content = tf_path.read_text(encoding="utf-8")
+            existing_tests_parts.append(
+                f"# === {tf} ===\n{content}"
+            )
+        else:
+            # Fallback: extract the added lines from the diff for this file
+            existing_tests_parts.append(
+                f"# === {tf} (from patch diff) ===\n"
+                + _extract_patch_additions(instance.test_patch, tf)
+            )
+
+    existing_tests = "\n\n".join(existing_tests_parts) if existing_tests_parts else instance.test_patch
+
+    # base_test_paths: all test file paths (used for validation placement)
+    base_test_paths = test_files  # may be empty, one, or many
 
     # 6. Renforcer les tests via LLM
     if do_enhance:
         print("[6] Analyse LLM + renforcement des tests...")
-        existing_tests = instance.test_patch
         enh = enhancer.enhance_tests(
             annotated_code=annotated_main or "(pas de code tracé)",
             variable_table=table,
@@ -146,7 +189,7 @@ def run_pipeline(
         validation = validate.validate_enhanced_tests(
             repo_dir=repo_dir,
             enhanced_tests=enh.enhanced_tests,
-            base_test_path=base_test_path or None,
+            base_test_paths=base_test_paths or None,
         )
         verdict = "VALIDES" if validation.is_valid else "REJETÉS"
         print(f"    -> tests renforcés {verdict} "

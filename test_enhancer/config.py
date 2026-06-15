@@ -17,9 +17,8 @@ WORK_DIR = PROJECT_ROOT / "runs"
 WORK_DIR.mkdir(exist_ok=True)
 
 # --- Dataset ---------------------------------------------------------------
-# Nom HuggingFace du dataset. SWE-bench Lite = 300 instances Python.
-DATASET_NAME = "princeton-nlp/SWE-bench_Lite"
-DATASET_SPLIT = "test"
+
+DATASET_DIR = "C:\\Users\\lachg\\Documents\\stage_concordia\\papers\\codes\\test_tracing\\test_enhancer\\test_enhancer\\local_dataset"
 
 # Chemin OPTIONNEL vers une soumission SWE-bench locale (dossier de résultats
 # d'un agent : trajs/, logs/, results/). Si défini, on peut utiliser le patch
@@ -30,10 +29,10 @@ LOCAL_SUBMISSION_DIR = os.environ.get("TE_LOCAL_SUBMISSION_DIR", "")
 # --- LLM -------------------------------------------------------------------
 # On lit la clé API depuis l'environnement. NE JAMAIS hardcoder une clé ici.
 # On lit la clé Gemini au lieu de OpenAI
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 # On change le modèle par défaut
-LLM_MODEL = os.environ.get("TE_LLM_MODEL", "gemini-2.5-flash")
+LLM_MODEL = os.environ.get("TE_LLM_MODEL", "https://api.minimaxi.com/v1")
 LLM_TEMPERATURE = 0.0  # déterministe pour la reproductibilité
 
 # --- Tracing ---------------------------------------------------------------

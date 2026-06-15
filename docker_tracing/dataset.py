@@ -13,36 +13,17 @@ from .config import DATASET_DIR
 @dataclass
 class Instance:
     """Représentation simplifiée d'une instance SWE-bench."""
-    def __init__(
-        self,
-        instance_id: str,
-        repo: str,
-        base_commit: str,
-        gold_patch: str,
-        test_patch: str,
-        fail_to_pass: list[str],
-        pass_to_pass: list[str],
-        environment_setup_commit: str,
-        problem_statement: str,
-        raw: dict[str, Any],
-    ) -> None:
-        self.instance_id = instance_id
-        self.repo = repo
-        self.base_commit = base_commit
-        self.gold_patch = gold_patch
-        self.test_patch = test_patch
-        self.fail_to_pass = fail_to_pass
-        self.pass_to_pass = pass_to_pass
-        self.environment_setup_commit = environment_setup_commit
-        self.problem_statement = problem_statement
-        self.raw = raw
- 
-    @property
+    instance_id: str
+    repo: str
+    base_commit: str
+    gold_patch: str
+    test_patch: str
+    fail_to_pass: list[str]
+    pass_to_pass: list[str]
+    environment_setup_commit: str
+    problem_statement: str
+    raw: dict[str, Any]  # on garde l'instance brute au cas où
 
-    def patch_to_apply(self) ->str:
-        """Return the patch that is going to applied"""
-        return self.gold_patch
-    
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "Instance":
         def _parse_list(value: Any) -> list[str]:

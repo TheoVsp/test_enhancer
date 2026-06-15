@@ -81,6 +81,8 @@ def prepare_repo(instance: Instance, work_root: Path) -> Path:
         ("code", instance.patch_to_apply),
         ("test", instance.test_patch),
     ]:
+        print(f"label={label}")
+        print(f"type={type(patch_text)}")
         if not patch_text.strip():
             continue
         patch_file = repo_dir / f"_te_{label}.patch"
