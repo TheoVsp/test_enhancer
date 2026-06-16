@@ -1,4 +1,18 @@
-# Test Enhancer Pipeline - V1 (Local Execution) (A mettre à jour)
+# Test Enhancer Pipeline - V1 (Local Execution)
+
+## NOUVEAU : flux "plan-guided" (génération guidée par un plan de test)
+
+Le pipeline génère désormais les tests en DEUX TEMPS, suivant la direction du Pr. Chen :
+
+1. **Plan de test** (`planner.py`) — le LLM identifie d'abord OÙ la suite de tests est faible, en raisonnant avec les concepts du test logiciel (equivalence partitioning, boundary value analysis, branch coverage, edge cases). Il produit un plan structuré ET un fichier Markdown lisible (`test_plan_reasoning.md`) qui retranscrit son raisonnement : où il voit une faiblesse, et pourquoi.
+2. **Génération depuis le plan** (`enhancer.py`) — le LLM écrit les tests qui réalisent le plan (ciblé, pas au hasard).
+3. **Validation + réparation en boucle** (`validate.py`) — les tests sont exécutés. Politique :
+   - un test qui **ne tourne pas** (erreur de syntaxe / import / API, c.-à-d. une exception qui n'est PAS une `AssertionError`) est renvoyé au LLM pour correction, jusqu'à 3 fois ;
+   - un test qui **tourne mais échoue sur une assertion** est GARDÉ et SIGNALÉ — il peut révéler un vrai bug du patch (on ne le "corrige" pas, ce serait masquer l'information).
+
+Fichiers produits par instance : `test_plan_reasoning.md` (le raisonnement), `enhanced_tests.py` (les tests finaux après réparation), `validation_log.txt` (diagnostic), `analysis.json` (tout, dont le plan).
+
+---
 
 Ce projet implémente un pipeline d'analyse dynamique et de renforcement de tests pour l'évaluation de LLMs sur le dataset **SWE-bench Lite**. 
 

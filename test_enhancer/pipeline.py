@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import artifacts, enhancer, evaluate, swe_runner, validate
+from . import artifacts, enhancer, evaluate, planner, swe_runner, validate
 from .config import WORK_DIR
 from .dataset import Instance, get_instance
 
@@ -123,76 +123,104 @@ def run_pipeline(
     if test_files:
         base_test_path = test_files[0]
 
-    # 6. Renforcer les tests via LLM
+    # 6. PLAN DE TEST (nouvelle étape) : le LLM identifie les faiblesses de
+    #    couverture en raisonnant avec les concepts du test logiciel.
     if do_enhance:
-        print("[6] Analyse LLM + renforcement des tests...")
         existing_tests = instance.test_patch
-        enh = enhancer.enhance_tests(
-            annotated_code=annotated_main or "(pas de code tracé)",
+        annotated = annotated_main or "(pas de code tracé)"
+
+        print("[6] Plan de test (concepts du test logiciel)...")
+        plan = planner.make_plan(
+            annotated_code=annotated,
             variable_table=table,
             existing_tests=existing_tests,
         )
+        print(f"    -> {len(plan.items)} objectif(s) de test planifie(s)")
+
+        # Fichier Markdown qui retranscrit le RAISONNEMENT du LLM (demande du
+        # prof) : ou il voit une faiblesse, et pourquoi.
+        reasoning_md = planner.render_reasoning_markdown(plan, instance_id)
+        (out_dir / "test_plan_reasoning.md").write_text(reasoning_md, encoding="utf-8")
+        print(f"    -> raisonnement ecrit : test_plan_reasoning.md")
+
+        # 7. GENERATION des tests A PARTIR DU PLAN.
+        print("[7] Generation des tests a partir du plan...")
+        enh = enhancer.enhance_tests(
+            annotated_code=annotated,
+            variable_table=table,
+            existing_tests=existing_tests,
+            plan=plan,
+        )
         print(f"    analyse: {enh.analysis[:120]}...")
 
-        # --- Point 1 : ÉVALUATION (comparaison avec les tests originaux) ------
-        print("[7] Évaluation : comparaison tests originaux vs renforcés...")
+        # 8. EVALUATION (comparaison avec les tests originaux).
+        print("[8] Evaluation : comparaison tests originaux vs renforces...")
         metrics = evaluate.compare(existing_tests, enh.enhanced_tests)
         delta = metrics["delta"]
-        print(f"    Δ assertions={delta['n_assertions']:+d}  "
-              f"Δ fonctions de test={delta['n_test_functions']:+d}")
+        print(f"    Delta assertions={delta['n_assertions']:+d}  "
+              f"Delta fonctions de test={delta['n_test_functions']:+d}")
 
-        # --- Point 2 : VALIDATION (les tests renforcés passent-ils ?) ---------
-        print("[8] Validation : exécution des tests renforcés sur le patch...")
-        validation = validate.validate_enhanced_tests(
+        # 9. VALIDATION + BOUCLE DE REPARATION.
+        #    - tests qui PLANTENT (errors) -> repares en boucle
+        #    - tests qui echouent sur ASSERTION (failures) -> gardes et signales
+        print("[9] Validation + reparation (tests qui ne tournent pas)...")
+        outcome = validate.validate_with_repair(
             repo_dir=repo_dir,
             enhanced_tests=enh.enhanced_tests,
+            annotated_code=annotated,
             base_test_path=base_test_path or None,
+            max_iterations=3,
         )
-        verdict = "VALIDES" if validation.is_valid else "REJETÉS"
-        print(f"    -> tests renforcés {verdict} "
-              f"(syntax={validation.syntax_ok}, collecte={validation.collected_ok}, "
-              f"passed={validation.passed}, {validation.n_passed}p/{validation.n_failed}f)")
-        if validation.notes:
-            for note in validation.notes:
-                print(f"       note: {note}")
+        v = outcome.result
+        print(f"    -> {v.n_passed} passent, {v.n_assertion_fails} echouent (assertion), "
+              f"{v.n_run_errors} ne tournent pas  |  reparations: {outcome.iterations}")
+        if outcome.has_assertion_failures:
+            print(f"    [!] {v.n_assertion_fails} test(s) tournent mais echouent sur assertion "
+                  f"-> GARDES et SIGNALES (peuvent reveler un vrai bug du patch)")
+        if outcome.has_run_errors:
+            print(f"    [!] Il reste des tests qui ne tournent pas apres "
+                  f"{outcome.iterations} tentative(s) de reparation.")
 
-        # On écrit les tests renforcés en .py lisible (plus pratique que le JSON
-        # échappé pour les relire / déboguer).
-        (out_dir / "enhanced_tests.py").write_text(
-            enh.enhanced_tests, encoding="utf-8"
-        )
+        # Le code final (apres reparations eventuelles)
+        (out_dir / "enhanced_tests.py").write_text(outcome.final_tests, encoding="utf-8")
 
-        # On écrit le log complet de la validation (sortie pytest) pour pouvoir
-        # diagnostiquer POURQUOI les tests échouent (hallucination de valeur,
-        # mauvaise API, import manquant...). C'est essentiel pour l'analyse.
+        # Log complet de la derniere validation (diagnostic).
         (out_dir / "validation_log.txt").write_text(
-            f"verdict: {verdict}\n"
-            f"syntax_ok={validation.syntax_ok}  collected_ok={validation.collected_ok}  "
-            f"passed={validation.passed}\n"
-            f"n_passed={validation.n_passed}  n_failed={validation.n_failed}  "
-            f"n_errors={validation.n_errors}\n"
-            f"notes={validation.notes}\n"
-            f"\n===== PYTEST STDOUT =====\n{validation.stdout}\n"
-            f"\n===== PYTEST STDERR =====\n{validation.stderr}\n",
+            f"iterations de reparation: {outcome.iterations}  (repaired={outcome.repaired})\n"
+            f"syntax_ok={v.syntax_ok}  collected_ok={v.collected_ok}  passed={v.passed}\n"
+            f"n_passed={v.n_passed}  n_failed={v.n_failed}  n_errors={v.n_errors}\n"
+            f"has_run_errors={outcome.has_run_errors}  "
+            f"has_assertion_failures={outcome.has_assertion_failures}\n"
+            f"notes={v.notes}\n"
+            f"\n===== PYTEST STDOUT =====\n{v.stdout}\n"
+            f"\n===== PYTEST STDERR =====\n{v.stderr}\n",
             encoding="utf-8",
         )
-        print(f"    -> log de validation écrit : validation_log.txt")
+        print(f"    -> log de validation ecrit : validation_log.txt")
 
-        # On sauvegarde tout dans analysis.json (enrichi)
+        # On sauvegarde tout dans analysis.json (enrichi avec le plan).
         (out_dir / "analysis.json").write_text(
             json.dumps(
                 {
+                    "plan": plan.as_dict(),
                     "analysis": enh.analysis,
-                    "enhanced_tests": enh.enhanced_tests,
+                    "enhanced_tests": outcome.final_tests,
                     "metrics": metrics,
-                    "validation": validation.as_dict(),
+                    "validation": v.as_dict(),
+                    "repair": {
+                        "iterations": outcome.iterations,
+                        "repaired": outcome.repaired,
+                        "has_run_errors": outcome.has_run_errors,
+                        "has_assertion_failures": outcome.has_assertion_failures,
+                    },
                 },
                 indent=2, ensure_ascii=False,
             ),
             encoding="utf-8",
         )
     else:
-        print("[6] (sauté : do_enhance=False)")
+        print("[6] (saute : do_enhance=False)")
+
 
     print(f"=== Terminé. Artefacts dans {out_dir} ===")
     return out_dir
