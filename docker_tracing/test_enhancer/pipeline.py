@@ -61,12 +61,12 @@ def run_pipeline(
     print("[3] Exécution des tests FAIL_TO_PASS sous tracer...")
     node_ids = swe_runner.resolve_node_ids(instance.fail_to_pass, instance.test_patch)
     print(f"    node ids résolus : {node_ids}")
-    patched_names, patched_paths = _get_patched_files(instance.gold_patch)
+    patched_names, target_paths = _get_patched_files(instance.gold_patch)
     if use_docker:
        
-        result = docker_runner.run_tests_traced_docker(instance, node_ids, force_rebuild=force_rebuild, target_files=patched_paths)
+        result = docker_runner.run_tests_traced_docker(instance, node_ids, force_rebuild=force_rebuild, target_files=target_paths)
     else:
-        result = swe_runner.run_tests_traced(repo_dir, node_ids, target_files=patched_paths)
+        result = swe_runner.run_tests_traced(repo_dir, node_ids, target_files=target_paths)
 
     print("=== STDOUT ===")
     print(result.stdout)

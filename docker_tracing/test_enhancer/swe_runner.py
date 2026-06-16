@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._hub import Instance
-from .tracer import VariableTracer
+from .tracer_standalone import VariableTracer
 
 
 @dataclass

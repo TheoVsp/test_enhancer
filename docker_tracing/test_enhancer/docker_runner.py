@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ._hub import Instance
 from .swe_runner import RunResult
-from .tracer import TraceRow, VariableTracer
+from .tracer_standalone import TraceRow, VariableTracer
 
 # Répertoire du package — contient tracer.py, config.py, runner_inside.py
 TRACER_INJECT_DIR = Path(__file__).parent
@@ -234,7 +234,7 @@ def run_tests_traced_docker(
         print(f"    [DOCKER] first_row={rows[0]}", file=sys.stderr, flush=True)
 
     # Reconstruire un VariableTracer pour transporter les rows
-    tracer = VariableTracer(watch_dir=watch_dir_in_container)
+    tracer = VariableTracer(watch_dir=watch_dir_in_container, target_files=target_files)
     tracer.rows = rows
 
     return RunResult(

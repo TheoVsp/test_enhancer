@@ -17,7 +17,7 @@ import csv
 from collections import defaultdict
 from pathlib import Path
 
-from .tracer import TraceRow
+from .tracer_standalone import TraceRow
 
 
 def build_variable_table(rows: list[TraceRow]) -> list[dict]:
