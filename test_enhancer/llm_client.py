@@ -13,7 +13,7 @@ import json
 
 from .config import GEMINI_API_KEY, LLM_MODEL, LLM_TEMPERATURE
 
-GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+GEMINI_BASE_URL = "https://api.minimaxi.com/v1"
 
 
 def _get_client():

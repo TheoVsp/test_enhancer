@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import artifacts, enhancer, evaluate, planner, swe_runner, validate
+from . import artifacts, enhancer, evaluate, planner, swe_runner, validate, docker_runner
 from .config import WORK_DIR
 from .dataset import Instance, get_instance
 
@@ -39,6 +39,8 @@ def _get_patched_files(patch_text: str) -> list[str]:
 def run_pipeline(
     instance_id: str,
     do_enhance: bool = True,
+    use_docker: bool = False,
+    force_rebuild: bool = False,
     use_agent_patch: bool | None = None,
 ) -> Path:
     """Exécute le pipeline complet sur une instance SWE-bench Lite.
@@ -71,9 +73,11 @@ def run_pipeline(
     node_ids = swe_runner.resolve_node_ids(instance.fail_to_pass, instance.test_patch)
     print(f"    node ids résolus : {node_ids}")
     patched_names, patched_paths = _get_patched_files(instance.gold_patch)
-    
-    result = swe_runner.run_tests_traced(repo_dir, node_ids, target_files=patched_paths)
-    
+    if use_docker:
+        result = docker_runner.run_tests_traced_docker(instance, node_ids, force_rebuild=force_rebuild, target_files=patched_paths)
+    else:
+        result = swe_runner.run_tests_traced(repo_dir, node_ids, target_files=patched_paths)
+
     (out_dir / "run_log.txt").write_text(
         f"success={result.success}\n\n--- STDOUT ---\n{result.stdout}\n"
         f"\n--- STDERR ---\n{result.stderr}\n",

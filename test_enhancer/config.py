@@ -33,12 +33,12 @@ LOCAL_SUBMISSION_DIR = os.environ.get("TE_LOCAL_SUBMISSION_DIR", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # On change le modèle par défaut
-LLM_MODEL = os.environ.get("TE_LLM_MODEL", "gemini-2.5-flash")
+LLM_MODEL = os.environ.get("TE_LLM_MODEL", "MiniMax-M2.7")
 LLM_TEMPERATURE = 0.0  # déterministe pour la reproductibilité
 
 # --- Tracing ---------------------------------------------------------------
 # Nombre maximum de lignes de trace qu'on garde par exécution de test
 # (évite d'exploser le contexte du LLM sur des boucles énormes).
-MAX_TRACE_ROWS = 2000
+MAX_TRACE_ROWS = 20000
 # Longueur maximale de la représentation d'une valeur de variable.
 MAX_VALUE_REPR_LEN = 200

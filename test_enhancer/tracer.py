@@ -26,8 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import MAX_TRACE_ROWS, MAX_VALUE_REPR_LEN
+MAX_TRACE_ROWS = 20000  
+MAX_VALUE_REPR_LEN = 200  
 
+#from config import MAX_TRACE_ROWS, MAX_VALUE_REPR_LEN
 
 @dataclass
 class TraceRow:

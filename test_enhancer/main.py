@@ -39,6 +39,8 @@ def main() -> None:
                         help="utiliser le patch de l'agent (soumission locale) au lieu du gold patch")
     parser.add_argument("--demo", action="store_true",
                         help="lancer l'exemple jouet local (voir demo_local.py)")
+    parser.add_argument("--docker", action="store_true",
+                    help="exécuter les tests dans un conteneur Docker SWE-bench")
     args = parser.parse_args()
 
     if args.list:
@@ -74,7 +76,7 @@ def main() -> None:
     from .pipeline import run_pipeline
     # use_agent_patch : si le flag est passé, on force ; sinon None = auto
     use_agent = True if args.use_agent_patch else None
-    run_pipeline(args.instance, do_enhance=not args.no_enhance,
+    run_pipeline(args.instance, do_enhance=not args.no_enhance,use_docker= args.docker,
                  use_agent_patch=use_agent)
 
 
