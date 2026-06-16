@@ -27,11 +27,13 @@ from .dataset import Instance, get_instance
 def _get_patched_files(patch_text: str) -> list[str]:
     """Extrait les noms des fichiers modifiés par un patch."""
     files = []
+    paths=[]
     for line in patch_text.splitlines():
         if line.startswith("+++ b/"):
             path = line[len("+++ b/"):].strip()
             files.append(Path(path).name)
-    return files
+            paths.append(path)
+    return files, paths
 
 
 def run_pipeline(
@@ -68,7 +70,9 @@ def run_pipeline(
     print("[3] Exécution des tests FAIL_TO_PASS sous tracer...")
     node_ids = swe_runner.resolve_node_ids(instance.fail_to_pass, instance.test_patch)
     print(f"    node ids résolus : {node_ids}")
-    result = swe_runner.run_tests_traced(repo_dir, node_ids)
+    patched_names, patched_paths = _get_patched_files(instance.gold_patch)
+    
+    result = swe_runner.run_tests_traced(repo_dir, node_ids, target_files=patched_paths)
     
     (out_dir / "run_log.txt").write_text(
         f"success={result.success}\n\n--- STDOUT ---\n{result.stdout}\n"
@@ -88,7 +92,6 @@ def run_pipeline(
 
     # Annoter les fichiers source touchés par la trace
     traced_files = sorted({r.filename for r in rows})
-    patched_names = _get_patched_files(instance.gold_patch)
     
     annotated_main = ""
     main_filename = ""

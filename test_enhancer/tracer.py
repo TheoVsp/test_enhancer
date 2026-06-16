@@ -85,9 +85,18 @@ class VariableTracer:
     serait inutilisable.
     """
 
-    def __init__(self, watch_dir: str | Path):
+    def __init__(self, watch_dir: str | Path, target_files: set[str] | None = None) -> None:
         self.watch_dir = os.path.normcase(str(Path(watch_dir).resolve()))
+        self.target_files = (
+            {os.path.normcase(str(Path(f).resolve())) for f in target_files}
+            if target_files else None
+        )
         self.rows: list[TraceRow] = []
+        self._step = 0
+        self._stopped = False
+
+    def reset(self) -> None:
+        self.rows.clear()
         self._step = 0
         self._stopped = False
 
@@ -107,14 +116,18 @@ class VariableTracer:
             resolved = os.path.normcase(str(p))
         except Exception:
             return False
-            
+        
+        # Start the tracing in the taget files if specified
+        if self.target_files is not None and resolved not in self.target_files:
+            return False  
+         
         # 3. Vérifier qu'on est bien dans le repo cible
         if not resolved.startswith(self.watch_dir):
             return False
             
         # 4. Ignorer l'infrastructure de test et de setup
         name = p.name.lower()
-        if "test" in name or name in ("setup.py", "conftest.py"):
+        if name in ("setup.py", "conftest.py"):
             return False
             
         return True
@@ -136,6 +149,9 @@ class VariableTracer:
                 # on ignore les variables "privées", les fonctions et modules
                 if not name.startswith("__") and not _is_noise(val)
             }
+            if event == "return":
+                snapshot["return_value"] = _safe_repr(arg)
+
             self.rows.append(
                 TraceRow(
                     step=self._step,
@@ -154,12 +170,23 @@ class VariableTracer:
         # dans cette frame.
         return self._trace_func
 
-    def __enter__(self) -> "VariableTracer":
+    def start(self) -> None:
+        self._stopped = False
         sys.settrace(self._trace_func)
         threading.settrace(self._trace_func)
+        frame = sys._getframe(1)
+        while frame is not None:
+            frame.f_trace = self._trace_func
+            frame.f_trace_lines = True
+            frame = frame.f_back
+    def stop(self) ->None:
+        sys.settrace(None)
+        threading.settrace(None)
+
+    def __enter__(self) -> "VariableTracer":
+        self.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):  # noqa: ANN001
-        sys.settrace(None)
-        threading.settrace(None)
+        self.stop()
         return False  # ne pas avaler les exceptions

@@ -139,15 +139,35 @@ def resolve_node_ids(test_ids: list[str], test_patch: str) -> list[str]:
             resolved.append(tid)  # fallback : on laisse pytest se débrouiller
     return resolved
 
+def _get_watch_dir(repo_dir: Path) -> Path:
+    """Dérive le dossier du package à tracer depuis le nom de l'instance.
+    
+    'sympy__sympy-20590' -> repo_dir/sympy
+    'django__django-12345' -> repo_dir/django
+    Falls back to repo_dir if the subdirectory doesn't exist.
+    """
+    package_name = repo_dir.name.split("__")[0]
+    watch_dir = repo_dir / package_name
+    if watch_dir.exists():
+        return watch_dir
+    # Some repos use src/ layout
+    src_layout = repo_dir / "src" / package_name
+    if src_layout.exists():
+        return src_layout
+    return repo_dir
 
-def run_tests_traced(repo_dir: Path, test_ids: list[str]) -> RunResult:
+def run_tests_traced(repo_dir: Path, test_ids: list[str], target_files: list[Path]=None) -> RunResult:
     """Exécute les tests donnés sous le tracer de variables.
 
     On utilise pytest en l'important programmatiquement et on injecte un
     plugin à la volée pour n'activer le tracer QUE pendant l'exécution
     du test (ignorant ainsi tout le bruit d'importation des modules).
     """
-    tracer = VariableTracer(watch_dir=repo_dir)
+    watch_dir = _get_watch_dir(repo_dir)
+    abs_target= None
+    if target_files is not None:
+        abs_target= {str((repo_dir /f).resolve())for f in target_files}
+    tracer = VariableTracer(watch_dir=watch_dir, target_files=abs_target)
 
     # On construit les arguments pytest
     pytest_args = ["-x", "-q", "--no-header", *test_ids]
