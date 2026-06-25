@@ -282,6 +282,22 @@ class RepairOutcome:
         return self.result.n_assertion_fails > 0
 
 
+def _count_test_functions(code: str) -> int:
+    """Compte les fonctions de test dans un bloc de code (pour détecter une
+    troncature pendant la réparation)."""
+    import ast as _ast
+    try:
+        tree = _ast.parse(code)
+    except SyntaxError:
+        import re
+        return len(re.findall(r"^\\s*def\\s+test\\w*\\s*\\(", code, re.MULTILINE))
+    return sum(
+        1 for n in _ast.walk(tree)
+        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+        and n.name.startswith("test")
+    )
+
+
 def validate_with_repair(
     repo_dir: Path,
     enhanced_tests: str,
@@ -329,13 +345,24 @@ def validate_with_repair(
             annotated_code=annotated_code,
         )
         iterations += 1
-        if fixed.strip() and fixed.strip() != current.strip():
-            current = fixed
-            repaired = True
-            result = validate_enhanced_tests(repo_dir, current, base_test_path)
-        else:
+        if not fixed.strip() or fixed.strip() == current.strip():
             # le LLM n'a rien changé -> inutile de continuer
             break
+
+        # PROTECTION ANTI-TRONCATURE : on n'accepte la réparation que si elle
+        # ne fait PAS perdre de tests. Le LLM renvoie parfois un fichier tronqué
+        # (il "oublie" les tests qui marchaient), ce qui détruirait du travail
+        # valide. Si le fichier réparé a moins de fonctions de test, on rejette
+        # la réparation et on garde la version précédente.
+        n_before = _count_test_functions(current)
+        n_after = _count_test_functions(fixed)
+        if n_after < n_before:
+            # réparation rejetée : elle tronque le fichier
+            break
+
+        current = fixed
+        repaired = True
+        result = validate_enhanced_tests(repo_dir, current, base_test_path)
 
     return RepairOutcome(
         final_tests=current,

@@ -25,12 +25,32 @@ Your job: write Python test code that REALISES the test plan. For each plan \
 item, write one or more tests that achieve its goal using the stated technique \
 and inputs.
 
-Rules:
+CRITICAL RULES TO AVOID WRONG EXPECTED VALUES (this is the main failure mode):
+- Do NOT guess expected output formats. Many libraries have non-obvious output \
+conventions (ordering of terms, bracket styles, spacing). If you are not CERTAIN \
+of the exact expected value, derive it from the runtime trace, or from the \
+existing tests' assertions, which show the TRUE output format.
+- Reuse the exact formatting conventions visible in the existing tests. If an \
+existing assertion shows mcode(x) == "f[x, y, z]", follow that EXACT bracket and \
+separator style for similar cases.
+- Prefer asserting properties you are sure of (type, length, membership, \
+substring) over guessing an exact string you are unsure about. A correct weaker \
+assertion is better than a wrong strong one.
+- For ordering-sensitive output (series, sums, polynomials), do NOT assume an \
+order unless the trace or existing tests confirm it.
+- Only assert an exact equality when the value is directly supported by the \
+trace or by an existing test.
+
+TEST STRUCTURE (very important for evaluation):
+- Create ONE separate, atomic test function PER plan item. Do NOT put many unrelated assertions into a single giant test function.
+- Give each function a descriptive name reflecting what it checks (e.g. test_prefix_multiplication_by_unit, test_prefix_zero_division).
+- Each test function should focus on ONE behaviour, with a few closely related assertions at most. This way, if one assertion is wrong, only that small test fails instead of hiding all the others.
+- Aim for roughly as many test functions as there are plan items.
+
+Other rules:
 - Build on the existing tests; do NOT remove existing assertions.
 - Use only the function's public interface unless the existing tests do otherwise.
-- Make assertions STRONG: assert exact values/structure, not just "is not None".
 - Keep the tests runnable and self-contained (include needed imports).
-- Ground expected values in the runtime trace when available.
 
 Respond ONLY with a JSON object of the form:
 {
