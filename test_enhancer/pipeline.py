@@ -183,7 +183,11 @@ def run_pipeline(
     summary: list[dict] = []
     aggregated_annotated_main = ""
     aggregated_main_filename = ""
-
+    # Path of the original test file (for validation step)
+    base_test_path = ""
+    test_files = swe_runner.extract_test_files(instance.test_patch)
+    if test_files:
+        base_test_path = test_files[0]
     for idx, (suite, test_id) in enumerate(all_tests, 1):
         safe_name = _safe_dir_name(test_id)
         test_dir = traces_dir / safe_name
@@ -204,43 +208,102 @@ def run_pipeline(
         rows = result.tracer.rows if result.tracer else []
         print(f"        success={result.success}  trace_rows={len(rows)}")
 
-        table, ann_main, ann_fname = _save_test_artifacts(
+        table, annotated_code, ann_fname = _save_test_artifacts(
             test_dir, result, patched_names,
             log_prefix=f"suite={suite}  test={test_id}\n",
         )
 
-        # Keep first non-empty annotated main for the LLM prompt
-        if ann_main and not aggregated_annotated_main:
-            aggregated_annotated_main = ann_main
-            aggregated_main_filename = ann_fname
-
-        # Accumulate rows for the global aggregated artefacts
+        
         all_rows.extend(rows)
+        if do_enhance:
 
-        summary.append({
-            "suite": suite,
-            "test_id": test_id,
-            "trace_dir": safe_name,
-            "success": result.success,
-            "n_trace_rows": len(rows),
-        })
+            plan = planner.make_plan(
+                annotated_code=annotated_code,
+                variable_table=table,
+                existing_tests=instance.test_patch,
+            )
 
-    # Write per-run summary
+            reasoning = planner.render_reasoning_markdown(plan, test_id)
+            (test_dir / "test_plan_reasoning.md").write_text(
+                reasoning,
+                encoding="utf-8",
+            )
+
+            enhancement = enhancer.enhance_tests(
+                annotated_code=annotated_code,
+                variable_table=table,
+                existing_tests=instance.test_patch,
+                plan=plan,
+            )
+
+            metrics = evaluate.compare(
+                instance.test_patch,
+                enhancement.enhanced_tests,
+            )
+
+            outcome = validate.validate_with_repair(
+                repo_dir=repo_dir,
+                enhanced_tests=enhancement.enhanced_tests,
+                annotated_code=annotated_code,
+                base_test_path=base_test_path or None,
+                max_iterations=3,
+            )
+
+            (test_dir / "enhanced_tests.py").write_text(
+                outcome.final_tests,
+                encoding="utf-8",
+            )
+
+            v = outcome.result
+
+            (test_dir / "validation_log.txt").write_text(
+                f"iterations de réparation: {outcome.iterations}  (repaired={outcome.repaired})\n"
+                f"syntax_ok={v.syntax_ok}  collected_ok={v.collected_ok}  passed={v.passed}\n"
+                f"n_passed={v.n_passed}  n_failed={v.n_failed}  n_errors={v.n_errors}\n"
+                f"has_run_errors={outcome.has_run_errors}  "
+                f"has_assertion_failures={outcome.has_assertion_failures}\n"
+                f"notes={v.notes}\n"
+                f"\n===== PYTEST STDOUT =====\n{v.stdout}\n"
+                f"\n===== PYTEST STDERR =====\n{v.stderr}\n",
+                encoding="utf-8",
+            )
+
+            (test_dir / "analysis.json").write_text(
+                json.dumps(
+                    {
+                        "suite": suite,
+                        "test_id": test_id,
+                        "analysis": enhancement.analysis,
+                        "plan": plan.as_dict(),
+                        "metrics": metrics,
+                        "validation": outcome.result.as_dict(),
+                        "repair": {
+                            "iterations": outcome.iterations,
+                            "repaired": outcome.repaired,
+                        },
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        else:
+            print("(sauté : do_enhance=False)")
+
+        summary.append(
+            {
+                "suite": suite,
+                "test_id": test_id,
+                "trace_dir": safe_name,
+                "success": result.success,
+                "n_trace_rows": len(rows),
+            }
+        )
     (traces_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    print(f"    -> résumé écrit : traces/summary.json  "
-          f"({len(all_rows)} lignes de trace au total)")
+    json.dumps(summary, indent=2, ensure_ascii=False),
+    encoding="utf-8",
+)
 
-    # ------------------------------------------------------------------
-    # 5. Artefacts agrégés (tous tests confondus) — pour le LLM
-    # ------------------------------------------------------------------
-    print("[5] Construction des artefacts agrégés (tous tests)...")
-    agg_table = artifacts.build_variable_table(all_rows)
-    artifacts.write_table_csv(agg_table, out_dir / "variable_table.csv")
-    artifacts.write_table_xlsx(agg_table, out_dir / "variable_table.xlsx")
-
-    # Re-annotate the patched source file using ALL rows aggregated
     traced_files_all = sorted({r.filename for r in all_rows})
     for fpath in traced_files_all:
         fp = Path(fpath)
@@ -248,114 +311,6 @@ def run_pipeline(
             continue
         out_annotated = out_dir / f"annotated_{fp.name}"
         artifacts.annotate_source(fp, all_rows, out_annotated)
-        # Overwrite aggregated_annotated_main with the richer aggregated version
-        if fp.name in patched_names:
-            aggregated_annotated_main = out_annotated.read_text(encoding="utf-8")
-            aggregated_main_filename = fp.name
-
-    if not aggregated_annotated_main and traced_files_all:
-        first_fp = Path(traced_files_all[0])
-        fallback = out_dir / f"annotated_{first_fp.name}"
-        if fallback.exists():
-            aggregated_annotated_main = fallback.read_text(encoding="utf-8")
-            aggregated_main_filename = first_fp.name
-
-    if aggregated_main_filename:
-        print(f"    -> fichier pertinent (agrégé) : {aggregated_main_filename}")
-
-    # Path of the original test file (for validation step)
-    base_test_path = ""
-    test_files = swe_runner.extract_test_files(instance.test_patch)
-    if test_files:
-        base_test_path = test_files[0]
-
-    # ------------------------------------------------------------------
-    # 6-9. Plan + génération + évaluation + validation (inchangé)
-    # ------------------------------------------------------------------
-    if do_enhance:
-        existing_tests = instance.test_patch
-        annotated = aggregated_annotated_main or "(pas de code tracé)"
-
-        print("[6] Plan de test (concepts du test logiciel)...")
-        plan = planner.make_plan(
-            annotated_code=annotated,
-            variable_table=agg_table,
-            existing_tests=existing_tests,
-        )
-        print(f"    -> {len(plan.items)} objectif(s) de test planifié(s)")
-
-        reasoning_md = planner.render_reasoning_markdown(plan, instance_id)
-        (out_dir / "test_plan_reasoning.md").write_text(reasoning_md, encoding="utf-8")
-        print("    -> raisonnement écrit : test_plan_reasoning.md")
-
-        print("[7] Génération des tests à partir du plan...")
-        enh = enhancer.enhance_tests(
-            annotated_code=annotated,
-            variable_table=agg_table,
-            existing_tests=existing_tests,
-            plan=plan,
-        )
-        print(f"    analyse: {enh.analysis[:120]}...")
-
-        print("[8] Évaluation : comparaison tests originaux vs renforcés...")
-        metrics = evaluate.compare(existing_tests, enh.enhanced_tests)
-        delta = metrics["delta"]
-        print(f"    Delta assertions={delta['n_assertions']:+d}  "
-              f"Delta fonctions de test={delta['n_test_functions']:+d}")
-
-        print("[9] Validation + réparation (tests qui ne tournent pas)...")
-        outcome = validate.validate_with_repair(
-            repo_dir=repo_dir,
-            enhanced_tests=enh.enhanced_tests,
-            annotated_code=annotated,
-            base_test_path=base_test_path or None,
-            max_iterations=3,
-        )
-        v = outcome.result
-        print(f"    -> {v.n_passed} passent, {v.n_assertion_fails} échouent (assertion), "
-              f"{v.n_run_errors} ne tournent pas  |  réparations: {outcome.iterations}")
-        if outcome.has_assertion_failures:
-            print(f"    [!] {v.n_assertion_fails} test(s) échouent sur assertion "
-                  "-> GARDÉS et SIGNALÉS")
-        if outcome.has_run_errors:
-            print(f"    [!] Des tests ne tournent pas après "
-                  f"{outcome.iterations} tentative(s) de réparation.")
-
-        (out_dir / "enhanced_tests.py").write_text(outcome.final_tests, encoding="utf-8")
-        (out_dir / "validation_log.txt").write_text(
-            f"iterations de réparation: {outcome.iterations}  (repaired={outcome.repaired})\n"
-            f"syntax_ok={v.syntax_ok}  collected_ok={v.collected_ok}  passed={v.passed}\n"
-            f"n_passed={v.n_passed}  n_failed={v.n_failed}  n_errors={v.n_errors}\n"
-            f"has_run_errors={outcome.has_run_errors}  "
-            f"has_assertion_failures={outcome.has_assertion_failures}\n"
-            f"notes={v.notes}\n"
-            f"\n===== PYTEST STDOUT =====\n{v.stdout}\n"
-            f"\n===== PYTEST STDERR =====\n{v.stderr}\n",
-            encoding="utf-8",
-        )
-        print("    -> log de validation écrit : validation_log.txt")
-
-        (out_dir / "analysis.json").write_text(
-            json.dumps(
-                {
-                    "plan": plan.as_dict(),
-                    "analysis": enh.analysis,
-                    "enhanced_tests": outcome.final_tests,
-                    "metrics": metrics,
-                    "validation": v.as_dict(),
-                    "repair": {
-                        "iterations": outcome.iterations,
-                        "repaired": outcome.repaired,
-                        "has_run_errors": outcome.has_run_errors,
-                        "has_assertion_failures": outcome.has_assertion_failures,
-                    },
-                },
-                indent=2, ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-    else:
-        print("[6] (sauté : do_enhance=False)")
-
+       
     print(f"=== Terminé. Artefacts dans {out_dir} ===")
     return out_dir
