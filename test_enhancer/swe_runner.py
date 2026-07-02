@@ -210,3 +210,18 @@ def run_tests_traced(repo_dir: Path, test_ids: list[str], target_files: list[Pat
         stdout=out_buf.getvalue(),
         stderr=err_buf.getvalue(),
     )
+
+def run_single_test_traced(
+    repo_dir: Path,
+    test_id: str,
+    target_files: list[Path] = None,
+) -> RunResult:
+    """Wrapper : trace UN seul test (pendant local de
+    run_single_test_traced_docker). Réutilise run_tests_traced avec une
+    liste d'un seul élément."""
+    return run_tests_traced(
+        repo_dir=repo_dir,
+        test_ids=[test_id],
+        target_files=target_files,
+    )
+    

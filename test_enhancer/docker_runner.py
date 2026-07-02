@@ -4,7 +4,7 @@ Custom Docker runner — construit une image par instance SWE-bench.
   1. Construit une image Docker locale  sweb.custom.<instance_id>
      - utilise les specs SWE-bench (swe_specs.get_spec) pour connaître
        la version Python exacte et les dépendances de chaque instance
-  2. Exécute les tests dans un conteneur éphémère (--rm)
+  2. Exécute les tests dans un conteneur (via docker cp + docker exec)
      - applique gold_patch + test_patch à runtime
      - injecte le tracer
      - retourne un RunResult identique à l'ancien runner
@@ -146,12 +146,12 @@ def run_tests_traced_docker(
     """
     Exécute les tests dans un conteneur Docker local.
 
-    Utilise `docker run --rm` avec deux volumes montés :
-      /tracer_inject  — patches + tracer scripts
-      /output         — trace_rows.json récupéré après l'exécution
-
-    NOTE Windows/WSL2 : les volumes -v fonctionnent depuis DOCKER_TMP_BASE
-    qui est sous le répertoire du projet (chemin stable, pas C:\\TEMP).
+    IMPORTANT (Windows + WSL2) : on n'utilise PAS de montage de volume (-v),
+    car les dossiers créés par tempfile ont des permissions que Docker Desktop
+    sous WSL2 ne peut pas traverser ("Accès refusé" / returncode 125). À la
+    place, on démarre un conteneur persistant, on copie les fichiers dedans
+    avec `docker cp`, on exécute avec `docker exec`, puis on récupère
+    trace_rows.json avec `docker cp`. Cette approche marche aussi sur Linux/Mac.
     """
     image = _image_name(instance.instance_id)
     package_name = instance.repo.split("/")[1]
@@ -168,9 +168,14 @@ def run_tests_traced_docker(
             stderr=f"Impossible de construire l'image Docker : {image}",
         )
 
-    # Zone de transit locale stable (pas dans %TEMP% pour éviter les problèmes WSL2)
+    container_name = f"te_run_{instance.instance_id.lower()}"
+
+    # Zone de transit locale stable
     docker_tmp = TRACER_INJECT_DIR.parent / "runs" / "_docker_tmp"
     docker_tmp.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+    result = None
 
     with tempfile.TemporaryDirectory(dir=str(docker_tmp)) as tmp:
         tmp_path = Path(tmp)
@@ -181,21 +186,17 @@ def run_tests_traced_docker(
         (tmp_path / "test.patch").write_text(
             _unix_text(instance.test_patch), encoding="utf-8", newline="\n")
 
-        # Fichier de sortie JSON (vide par défaut si le runner plante)
-        output_file = tmp_path / "trace_rows.json"
-        output_file.write_text("[]", encoding="utf-8")
-
         # Copier le tracer et ses dépendances
         shutil.copy(TRACER_INJECT_DIR / "tracer.py",        tmp_path / "tracer.py")
         shutil.copy(TRACER_INJECT_DIR / "config.py",        tmp_path / "config.py")
         shutil.copy(TRACER_INJECT_DIR / "runner_inside.py", tmp_path / "runner_inside.py")
 
-        # 3. Commande shell dans le conteneur
+        # 3. Commande shell dans le conteneur (chemins /tracer_inject -> /tmp/tracer_inject)
         def _apply(fname: str) -> str:
             return (
-                f"git apply /tracer_inject/{fname} --ignore-whitespace "
-                f"|| git apply /tracer_inject/{fname} --reject "
-                f"|| patch -p1 -f --ignore-whitespace < /tracer_inject/{fname}"
+                f"git apply /tmp/tracer_inject/{fname} --ignore-whitespace "
+                f"|| git apply /tmp/tracer_inject/{fname} --reject "
+                f"|| patch -p1 -f --ignore-whitespace < /tmp/tracer_inject/{fname}"
             )
 
         patch_cmd = " && ".join([
@@ -205,9 +206,6 @@ def run_tests_traced_docker(
             _apply("test.patch"),
         ])
 
-        # Trouver le bon interpréteur Python 3 dans le conteneur.
-        # /opt/conda/envs/testenv/bin/python est l'env SWE-bench standard,
-        # mais certaines images anciennes l'ont sous Python 2 — on vérifie.
         find_python = (
             "PYTHON=; "
             "for _py in "
@@ -233,46 +231,62 @@ def run_tests_traced_docker(
 
         runner_cmd = (
             find_python + " && "
-            "$PYTHON /tracer_inject/runner_inside.py "
+            "$PYTHON /tmp/tracer_inject/runner_inside.py "
             f"{watch_dir_in_container} "
-            f"/output/trace_rows.json "
+            f"/tmp/tracer_inject/trace_rows.json "
             + quoted_ids
             + target_args
         )
 
         full_cmd = f"{patch_cmd} && {runner_cmd}"
 
-        cmd = [
-            "docker", "run", "--rm",
-            *_extra_env(instance),
-            "-v", f"{tmp_path}:/output",
-            "-v", f"{tmp_path}:/tracer_inject",
-            image,
-            "/bin/bash", "-c", full_cmd,
-        ]
+        def _drun(args):
+            return subprocess.run(args, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace")
 
-        print(f"    [DOCKER] démarrage du conteneur...", file=sys.stderr, flush=True)
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-        )
-        print(f"    [DOCKER] returncode={result.returncode}", file=sys.stderr, flush=True)
-        if result.returncode != 0:
-            print(f"    [DOCKER] stderr={result.stderr[:800]}", file=sys.stderr, flush=True)
-
-        success = result.returncode == 0
-
-        # 4. Lire les trace rows
         try:
-            rows_data = json.loads(output_file.read_text(encoding="utf-8"))
-            rows = [TraceRow(**r) for r in rows_data]
-        except Exception as exc:
-            print(f"    [DOCKER] lecture trace_rows.json échouée : {exc}",
-                  file=sys.stderr, flush=True)
-            rows = []
+            # 4. Démarrer un conteneur persistant (pas de --rm, pas de -v)
+            _drun(["docker", "rm", "-f", container_name])  # nettoyage résiduel
+            start = _drun(["docker", "run", "-d", "--name", container_name,
+                           *_extra_env(instance), image, "sleep", "infinity"])
+            if start.returncode != 0:
+                print(f"    [DOCKER] échec démarrage conteneur : {start.stderr[:500]}",
+                      file=sys.stderr, flush=True)
+                raise RuntimeError("docker run -d failed")
+
+            # 5. Copier les fichiers dans le conteneur (sous /tmp/tracer_inject)
+            _drun(["docker", "exec", container_name, "mkdir", "-p", "/tmp/tracer_inject"])
+            for fname in ("gold.patch", "test.patch", "tracer.py", "config.py",
+                          "runner_inside.py"):
+                _drun(["docker", "cp", str(tmp_path / fname),
+                       f"{container_name}:/tmp/tracer_inject/{fname}"])
+
+            # 6. Exécuter la commande dans le conteneur
+            print(f"    [DOCKER] exécution dans le conteneur...", file=sys.stderr, flush=True)
+            result = _drun(["docker", "exec", container_name, "/bin/bash", "-c", full_cmd])
+            print(f"    [DOCKER] returncode={result.returncode}", file=sys.stderr, flush=True)
+            if result.returncode != 0:
+                print(f"    [DOCKER] stderr={result.stderr[:800]}", file=sys.stderr, flush=True)
+
+            # 7. Récupérer trace_rows.json du conteneur vers l'hôte
+            out_json = tmp_path / "trace_rows.json"
+            _drun(["docker", "cp",
+                   f"{container_name}:/tmp/tracer_inject/trace_rows.json",
+                   str(out_json)])
+            try:
+                rows_data = json.loads(out_json.read_text(encoding="utf-8"))
+                rows = [TraceRow(**r) for r in rows_data]
+            except Exception as exc:
+                print(f"    [DOCKER] lecture trace_rows.json échouée : {exc}",
+                      file=sys.stderr, flush=True)
+                rows = []
+        finally:
+            # 8. Toujours nettoyer le conteneur
+            _drun(["docker", "rm", "-f", container_name])
 
     print(f"    [DOCKER] trace_rows={len(rows)}", file=sys.stderr, flush=True)
 
+    success = (result is not None) and (result.returncode == 0)
     tracer = VariableTracer(watch_dir=watch_dir_in_container, target_files=target_files)
     tracer.rows = rows
 
@@ -280,8 +294,8 @@ def run_tests_traced_docker(
         success=success,
         repo_dir=Path("/repo"),
         tracer=tracer,
-        stdout=result.stdout,
-        stderr=result.stderr,
+        stdout=result.stdout if result else "",
+        stderr=result.stderr if result else "",
     )
 
 

@@ -97,6 +97,17 @@ def build_user_prompt(annotated_code: str, variable_table: list[dict],
 
 Write the tests that realise this plan now."""
 
+def _as_text(value) -> str:
+    """Force une valeur en chaîne (le LLM renvoie parfois analysis en dict/list
+    au lieu d'une string, ce qui casse les usages type analysis[:120])."""
+    if isinstance(value, str):
+        return value
+    import json as _json
+    try:
+        return _json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return str(value)
+
 
 def enhance_tests(annotated_code: str, variable_table: list[dict],
                   existing_tests: str, plan: TestPlan) -> EnhancementResult:
@@ -105,7 +116,7 @@ def enhance_tests(annotated_code: str, variable_table: list[dict],
                                      existing_tests, plan)
     parsed, raw = llm_client.call_json(SYSTEM_PROMPT, user_prompt)
     return EnhancementResult(
-        analysis=parsed.get("analysis", ""),
+        analysis=_as_text(parsed.get("analysis", "")),
         enhanced_tests=parsed.get("enhanced_tests", ""),
         raw_response=raw,
     )
