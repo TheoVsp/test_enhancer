@@ -10,45 +10,74 @@ Le fournisseur (URL) et le modèle sont configurables sans toucher au code :
   - TE_LLM_MODEL    : le modèle (via config.py)
   - GEMINI_API_KEY  : la clé d'API
 
-Inclut un RETRY automatique sur les erreurs temporaires (503 surcharge,
-429 rate limit, erreurs réseau), indispensable pour les runs à grande échelle.
+Inclut :
+  - un RETRY automatique sur les erreurs temporaires (503/429/réseau)
+  - un parsing JSON TOLÉRANT (certains modèles comme MiniMax ne respectent
+    pas la consigne "réponds uniquement en JSON" et entourent le JSON de
+    texte ou de Markdown -> on extrait quand même l'objet JSON).
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import time
 
 from .config import GEMINI_API_KEY, LLM_MODEL, LLM_TEMPERATURE
 
-# URL configurable via variable d'environnement (défaut : Gemini).
-# Pour MiniMax : set TE_LLM_BASE_URL=https://api.minimaxi.com/v1
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 LLM_BASE_URL = os.environ.get("TE_LLM_BASE_URL", DEFAULT_BASE_URL)
 
-# Paramètres de retry
-MAX_RETRIES = 4           # nombre de tentatives sur erreur temporaire
-RETRY_BASE_DELAY = 3.0    # délai de base en secondes (backoff exponentiel)
+MAX_RETRIES = 4
+RETRY_BASE_DELAY = 3.0
 
 
 def _get_client():
     if not GEMINI_API_KEY:
         raise RuntimeError(
-            "GEMINI_API_KEY non défini. Configure ta clé avant de lancer : "
-            "set GEMINI_API_KEY=..."
+            "GEMINI_API_KEY non défini. Configure ta clé avant de lancer."
         )
     from openai import OpenAI
     return OpenAI(api_key=GEMINI_API_KEY, base_url=LLM_BASE_URL)
 
 
-def _is_retryable(exc: Exception) -> bool:
-    """Vrai si l'erreur est temporaire et mérite une nouvelle tentative.
+def extract_json(raw: str) -> dict:
+    """Extrait un objet JSON d'une réponse LLM, même entourée de texte/Markdown.
 
-    On réessaie sur : surcharge serveur (503), rate limit (429), et erreurs
-    réseau/timeout. On NE réessaie PAS sur les erreurs définitives comme
-    l'authentification (401) ou une requête invalide (400).
+    Gère les modèles qui ne respectent pas 'réponds uniquement en JSON' :
+      - JSON pur
+      - blocs ```json ... ``` ou ``` ... ```
+      - texte avant/après le JSON
+    Renvoie {} si aucun JSON exploitable n'est trouvé.
     """
-    # Import local pour ne pas imposer la dépendance au moment de l'import
+    if not raw or not raw.strip():
+        return {}
+    # 1. Parse direct (cas idéal)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # 2. Bloc Markdown ```json ... ``` ou ``` ... ```
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if fenced:
+        try:
+            return json.loads(fenced.group(1))
+        except json.JSONDecodeError:
+            pass
+    # 3. Du premier { au dernier } (gère le texte avant/après)
+    first = raw.find("{")
+    last = raw.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        try:
+            return json.loads(raw[first:last + 1])
+        except json.JSONDecodeError:
+            pass
+    # 4. Échec
+    return {}
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Vrai si l'erreur est temporaire (503/429/réseau). Pas de retry sur 401/400."""
     try:
         from openai import (
             APIConnectionError,
@@ -62,8 +91,6 @@ def _is_retryable(exc: Exception) -> bool:
     if isinstance(exc, (APITimeoutError, APIConnectionError, RateLimitError,
                         InternalServerError)):
         return True
-
-    # Filet de sécurité : certains codes arrivent sous APIStatusError générique
     status = getattr(exc, "status_code", None)
     if status in (429, 500, 502, 503, 504):
         return True
@@ -71,14 +98,10 @@ def _is_retryable(exc: Exception) -> bool:
 
 
 def call_json(system_prompt: str, user_prompt: str) -> tuple[dict, str]:
-    """Appelle le LLM en exigeant une réponse JSON, avec retry automatique.
+    """Appelle le LLM en demandant du JSON, avec retry ET parsing tolérant.
 
     Returns:
-        (parsed_dict, raw_text). Si le JSON est invalide, parsed_dict = {}.
-
-    Raises:
-        La dernière exception si toutes les tentatives échouent, ou
-        immédiatement si l'erreur n'est pas temporaire (ex. 401).
+        (parsed_dict, raw_text). parsed_dict = {} si aucun JSON exploitable.
     """
     client = _get_client()
     last_exc: Exception | None = None
@@ -95,17 +118,13 @@ def call_json(system_prompt: str, user_prompt: str) -> tuple[dict, str]:
                 response_format={"type": "json_object"},
             )
             raw = response.choices[0].message.content or "{}"
-            try:
-                return json.loads(raw), raw
-            except json.JSONDecodeError:
-                return {}, raw
+            # Parsing TOLÉRANT (gère MiniMax & co qui ajoutent du texte/Markdown)
+            return extract_json(raw), raw
 
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if not _is_retryable(exc) or attempt == MAX_RETRIES:
-                # Erreur définitive, ou plus de tentatives -> on propage
                 raise
-            # Backoff exponentiel : 3s, 6s, 12s...
             delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
             print(
                 f"    [LLM] erreur temporaire ({type(exc).__name__}), "
@@ -114,7 +133,6 @@ def call_json(system_prompt: str, user_prompt: str) -> tuple[dict, str]:
             )
             time.sleep(delay)
 
-    # On ne devrait jamais arriver ici, mais par sécurité :
     if last_exc:
         raise last_exc
     return {}, "{}"
