@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 """
-Script exécuté DANS le conteneur Docker.
+Script executed in Docker container.
 Activates the tracer, runs pytest, writes trace rows to JSON.
 
 Usage (inside container):

@@ -34,6 +34,7 @@ class Instance:
     test_patch: str
     fail_to_pass: list[str]
     pass_to_pass: list[str]
+    version: str
     environment_setup_commit: str
     problem_statement: str
     raw: dict[str, Any]  # on garde l'instance brute au cas où
@@ -65,6 +66,7 @@ class Instance:
             pass_to_pass=_parse_list(row.get("PASS_TO_PASS", "[]")),
             environment_setup_commit=row.get("environment_setup_commit", row["base_commit"]),
             problem_statement=row.get("problem_statement", ""),
+            version=row.get("version",""),
             raw=row,
         )
 
