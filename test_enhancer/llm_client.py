@@ -52,6 +52,14 @@ def extract_json(raw: str) -> dict:
     """
     if not raw or not raw.strip():
         return {}
+    # 0. Retirer les blocs de raisonnement <think>...</think> émis par les
+    #    modèles de raisonnement (ex. MiniMax-M2.x). Ces blocs contiennent
+    #    souvent des accolades qui trompent l'extraction du JSON.
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    # Filet : si une balise <think> ouvrante traîne sans fermeture, on coupe
+    raw = re.sub(r"<think>.*$", "", raw, flags=re.DOTALL)
+    if not raw.strip():
+        return {}
     # 1. Parse direct (cas idéal)
     try:
         return json.loads(raw)
