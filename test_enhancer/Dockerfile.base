@@ -1,0 +1,23 @@
+# sweb.base
+#
+# Shared foundation image for the whole 3-layer hierarchy:
+#   sweb.base  -> sweb.env.<repo>.<version>.<hash>  -> sweb.eval.<instance_id>
+#
+# Built once, reused by every env image. Contains only OS-level packages
+# and Miniconda — nothing repo- or version-specific lives here.
+
+FROM continuumio/miniconda3:latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        patch \
+        build-essential \
+        curl \
+        ca-certificates \
+        locales \
+    && rm -rf /var/lib/apt/lists/* \
+    && conda config --set always_yes true \
+    && conda clean -afy
+
+SHELL ["/bin/bash", "-c"]
+WORKDIR /

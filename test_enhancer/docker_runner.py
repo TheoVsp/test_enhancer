@@ -1,20 +1,35 @@
 """
-Custom Docker runner — construit une image par instance SWE-bench.
+Custom Docker runner — 3-layer image hierarchy à la SWE-bench.
 
-  1. Construit une image Docker locale  sweb.custom.<instance_id>
-     - utilise les specs SWE-bench (swe_specs.get_spec) pour connaître
-       la version Python exacte et les dépendances de chaque instance
-  2. Exécute les tests dans un conteneur (via docker cp + docker exec)
-     - applique gold_patch + test_patch à runtime
-     - injecte le tracer
-     - retourne un RunResult identique à l'ancien runner
+  sweb.base                                  (built once, shared by everything)
+    -> sweb.env.<repo>.<version>.<spec_hash>  (shared across instances of the
+                                                same repo+version; tag embeds a
+                                                hash of the spec so it rebuilds
+                                                automatically when deps change)
+      -> sweb.eval.<instance_id>              (repo cloned + pinned to
+                                                base_commit, one per instance)
 
-L'image est buildée une seule fois puis mise en cache par Docker.
-Les patches sont toujours appliqués à runtime → pas besoin de rebuild.
+  Runtime flow (unchanged from before):
+    1. Build the 3 layers above as needed (cheap no-ops if already cached)
+    2. Start a persistent container from sweb.eval.<instance_id>
+    3. docker cp the tracer + gold/test patches in, apply patches at runtime
+    4. docker exec the traced test run
+    5. docker cp trace_rows.json back out
+    6. Remove the container
+
+  Patches are always applied at runtime -> no rebuild needed between runs of
+  the same instance.
+
+  IMPORTANT (Windows + WSL2): no -v volume mounts anywhere, including at
+  build time implicitly via bind-mounted context — build contexts here are
+  tiny temp dirs holding only a Dockerfile, so this is unaffected. Runtime
+  file transfer still goes through `docker cp`, exactly as before.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -29,14 +44,38 @@ from .tracer import TraceRow, VariableTracer
 # Répertoire du package — contient tracer.py, config.py, runner_inside.py
 TRACER_INJECT_DIR = Path(__file__).parent
 
-# Dockerfile template situé à la racine du package
-DOCKERFILE_TEMPLATE = Path(__file__).parent / "Dockerfile.template"
+# Dockerfile templates, un par couche
+DOCKERFILE_BASE = TRACER_INJECT_DIR / "Dockerfile.base"
+DOCKERFILE_ENV  = TRACER_INJECT_DIR / "Dockerfile.env"
+DOCKERFILE_EVAL = TRACER_INJECT_DIR / "Dockerfile.eval"
+
+BASE_IMAGE = "sweb.base:latest"
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers génériques ──────────────────────────────────────────────────────
 
-def _image_name(instance_id: str) -> str:
-    return f"sweb.custom.{instance_id.lower()}"
+def _slug(text: str) -> str:
+    """Nom Docker-safe : minuscules, seuls [a-z0-9._-] autorisés."""
+    return re.sub(r"[^a-z0-9._-]+", "_", text.lower()).strip("_")
+
+
+def _spec_hash(spec: dict) -> str:
+    """Hash court des champs qui influencent la couche env (pas eval)."""
+    relevant = {
+        "python": spec.get("python", "3.11"),
+        "packages": spec.get("packages", ""),
+        "pip_packages": sorted(spec.get("pip_packages", [])),
+    }
+    blob = json.dumps(relevant, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+def _env_image_name(repo: str, version: str, spec: dict) -> str:
+    return f"sweb.env.{_slug(repo)}.{_slug(version)}.{_spec_hash(spec)}"
+
+
+def _eval_image_name(instance_id: str) -> str:
+    return f"sweb.eval.{_slug(instance_id)}"
 
 
 def _image_exists(image: str) -> bool:
@@ -62,77 +101,172 @@ def _extra_env(instance: Instance) -> list[str]:
     return env
 
 
-# ── Build ─────────────────────────────────────────────────────────────────────
-
-def build_image(instance: Instance, force_rebuild: bool = False) -> bool:
-    """
-    Construit l'image Docker pour une instance si elle n'existe pas encore.
-    Utilise swe_specs.get_spec(repo, version) pour obtenir :
-      - la version Python exacte
-      - les pip_packages à pré-installer
-      - la commande d'installation éditable
-      - les pre_install commands (apt-get, sed …)
-    """
-    image = _image_name(instance.instance_id)
-
-    if not force_rebuild and _image_exists(image):
-        print(f"    [BUILD] image {image} déjà présente, skip build.",
-              file=sys.stderr, flush=True)
-        return True
-
-    if not DOCKERFILE_TEMPLATE.exists():
-        print(f"    [BUILD] Dockerfile.template introuvable : {DOCKERFILE_TEMPLATE}",
+def _docker_build(dockerfile: Path, tag: str, build_args: dict[str, str],
+                   log_prefix: str) -> bool:
+    """Construit une image à partir d'un unique Dockerfile dans un contexte
+    temporaire minimal (le Dockerfile lui-même — pas de fichiers repo)."""
+    if not dockerfile.exists():
+        print(f"    [BUILD] {log_prefix} Dockerfile introuvable : {dockerfile}",
               file=sys.stderr, flush=True)
         return False
 
-    # Récupérer le spec SWE-bench pour ce repo+version
-    spec = get_spec(instance.repo, instance.version)
-    python_version  = spec.get("python", "3.11")
-    pip_packages    = spec.get("pip_packages", [])
-    install_cmd     = spec.get("install", "python -m pip install -e .")
-    pre_install     = spec.get("pre_install", [])
-
-    # Sérialiser pip_packages et pre_install en chaînes séparées par des espaces/newlines
-    pip_packages_str = " ".join(f'"{p}"' for p in pip_packages) if pip_packages else ""
-    pre_install_str  = " && ".join(pre_install) if pre_install else "true"
-
-    print(f"    [BUILD] construction de {image} ...", file=sys.stderr, flush=True)
-    print(f"    [BUILD] repo={instance.repo}  version={instance.version}"
-          f"  python={python_version}", file=sys.stderr, flush=True)
-    print(f"    [BUILD] install_cmd={install_cmd}", file=sys.stderr, flush=True)
-    print(f"    [BUILD] pip_packages={pip_packages_str[:120]}...", file=sys.stderr, flush=True)
-
     with tempfile.TemporaryDirectory() as ctx:
         ctx_path = Path(ctx)
-        shutil.copy(DOCKERFILE_TEMPLATE, ctx_path / "Dockerfile")
+        shutil.copy(dockerfile, ctx_path / "Dockerfile")
 
-        cmd = [
-            "docker", "build",
-            "--build-arg", f"REPO={instance.repo}",
-            "--build-arg", f"BASE_COMMIT={instance.base_commit}",
-            "--build-arg", f"ENV_SETUP_COMMIT={instance.environment_setup_commit}",
-            "--build-arg", f"PYTHON_VERSION={python_version}",
-            "--build-arg", f"PIP_PACKAGES={pip_packages_str}",
-            "--build-arg", f"INSTALL_CMD={install_cmd}",
-            "--build-arg", f"PRE_INSTALL={pre_install_str}",
-            "-t", image,
-            str(ctx_path),
-        ]
+        cmd = ["docker", "build"]
+        for key, val in build_args.items():
+            cmd += ["--build-arg", f"{key}={val}"]
+        cmd += ["-t", tag, str(ctx_path)]
+
         result = subprocess.run(
             cmd, capture_output=True, text=True,
             encoding="utf-8", errors="replace",
         )
 
     if result.returncode != 0:
-        print(f"    [BUILD] ÉCHEC (code {result.returncode})", file=sys.stderr, flush=True)
-        print(f"    [BUILD] stdout (last 3000):\n{result.stdout[-3000:]}",
+        runs_path= Path("runs/docker_logs")
+        runs_path.mkdir(parents=True, exist_ok=True)
+        stdout_dir= runs_path /"docker_build_stdout.log"
+        stderr_dir= runs_path /"docker_build_stderr.log"
+        (stdout_dir).write_text(
+    result.stdout,
+    encoding="utf-8",
+)
+        (stderr_dir).write_text(
+    result.stderr,
+    encoding="utf-8",
+)
+        print(f"    [BUILD] {log_prefix} ÉCHEC (code {result.returncode})",
               file=sys.stderr, flush=True)
-        print(f"    [BUILD] stderr (last 3000):\n{result.stderr[-3000:]}",
-              file=sys.stderr, flush=True)
+        #print(f"    [BUILD] {log_prefix} stdout (last 3000):\n{result.stdout[-3000:]}",
+        #      file=sys.stderr, flush=True)
+        #print(f"    [BUILD] {log_prefix} stderr (last 3000):\n{result.stderr[-3000:]}",
+         #     file=sys.stderr, flush=True)
         return False
 
-    print(f"    [BUILD] image {image} construite avec succès.", file=sys.stderr, flush=True)
+    print(f"    [BUILD] {log_prefix} {tag} construite avec succès.",
+          file=sys.stderr, flush=True)
     return True
+
+
+# ── Layer 1 : base ───────────────────────────────────────────────────────────
+
+def build_base_image(force_rebuild: bool = True) -> bool:
+    """Construit sweb.base une seule fois (Ubuntu + Miniconda + apt deps).
+    Partagée par toutes les images env, jamais reconstruite sauf demande
+    explicite."""
+    if not force_rebuild and _image_exists(BASE_IMAGE):
+        print(f"    [BUILD] base {BASE_IMAGE} déjà présente, skip build.",
+              file=sys.stderr, flush=True)
+        return True
+
+    print("    [BUILD] construction de la couche base...", file=sys.stderr, flush=True)
+    return _docker_build(DOCKERFILE_BASE, BASE_IMAGE, {}, "[base]")
+
+
+# ── Layer 2 : env (partagée par repo+version) ────────────────────────────────
+
+def build_env_image(instance: Instance, spec: dict, force_rebuild: bool ) -> str | None:
+    """Construit (ou réutilise) sweb.env.<repo>.<version>.<hash>.
+
+    Le tag encode un hash de (python, packages, pip_packages) : si le spec
+    change dans swe_specs.py, le tag change, donc l'ancienne image reste en
+    cache (inoffensive) et une nouvelle est construite automatiquement — pas
+    besoin de force_rebuild pour ça, seulement pour re-forcer un tag existant.
+    """
+    tag = _env_image_name(instance.repo, instance.version, spec)
+
+    if not force_rebuild and _image_exists(tag):
+        print(f"    [BUILD] env {tag} déjà présente, skip build.",
+              file=sys.stderr, flush=True)
+        return tag
+
+    if not build_base_image():
+        return None
+
+    python_version = spec.get("python", "3.11")
+    packages       = spec.get("packages", "")
+    pip_packages   = spec.get("pip_packages", [])
+    pip_packages_str = " ".join(f'"{p}"' for p in pip_packages) if pip_packages else ""
+
+    print(f"    [BUILD] construction de {tag} ...", file=sys.stderr, flush=True)
+    print(f"    [BUILD] repo={instance.repo}  version={instance.version}"
+          f"  python={python_version}  packages={packages!r}",
+          file=sys.stderr, flush=True)
+
+    ok = _docker_build(
+        DOCKERFILE_ENV, tag,
+        {
+            "BASE_IMAGE": BASE_IMAGE,
+            "REPO": instance.repo,
+            "ENV_SETUP_COMMIT": instance.environment_setup_commit,
+            "PYTHON_VERSION": python_version,
+            "PACKAGES": packages,
+            "PIP_PACKAGES": pip_packages_str,
+        },
+        "[env]",
+    )
+    return tag if ok else None
+
+
+# ── Layer 3 : eval (une par instance) ────────────────────────────────────────
+
+def build_eval_image(instance: Instance, env_tag: str, spec: dict,
+                      force_rebuild: bool ) -> str | None:
+    """Construit (ou réutilise) sweb.eval.<instance_id> sur la base de
+    env_tag : clone le repo, le pin à base_commit, exécute pre_install puis
+    install."""
+    tag = _eval_image_name(instance.instance_id)
+
+    if not force_rebuild and _image_exists(tag):
+        print(f"    [BUILD] eval {tag} déjà présente, skip build.",
+              file=sys.stderr, flush=True)
+        return tag
+
+    install_cmd = spec.get("install", "python -m pip install -e .")
+    pre_install = spec.get("pre_install", [])
+    pre_install_str = " && ".join(pre_install) if pre_install else "true"
+
+    print(f"    [BUILD] construction de {tag} ...", file=sys.stderr, flush=True)
+    print(f"    [BUILD] base={env_tag}  base_commit={instance.base_commit}",
+          file=sys.stderr, flush=True)
+    print(f"    [BUILD] install_cmd={install_cmd}", file=sys.stderr, flush=True)
+
+    ok = _docker_build(
+        DOCKERFILE_EVAL, tag,
+        {
+            "BASE_IMAGE": env_tag,
+            "REPO": instance.repo,
+            "BASE_COMMIT": instance.base_commit,
+            "PRE_INSTALL": pre_install_str,
+            "INSTALL_CMD": install_cmd,
+        },
+        "[eval]",
+    )
+    return tag if ok else None
+
+
+# ── Orchestration (API inchangée pour pipeline.py) ───────────────────────────
+
+def build_image(instance: Instance, force_rebuild: bool ) -> bool:
+    """Construit les 3 couches dans l'ordre pour une instance.
+
+    force_rebuild ne force que la couche eval (la plus courante à vouloir
+    reconstruire, ex. après un changement de install_cmd) ; base et env sont
+    déjà auto-invalidées par leur clé de cache (nom d'image / hash de spec).
+    """
+    spec = get_spec(instance.repo, instance.version)
+
+    if not build_base_image():
+        return False
+
+    env_tag = build_env_image(instance, spec, force_rebuild)
+    if env_tag is None:
+        return False
+
+    eval_tag = build_eval_image(instance, env_tag, spec, force_rebuild=force_rebuild)
+    return eval_tag is not None
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
@@ -140,11 +274,12 @@ def build_image(instance: Instance, force_rebuild: bool = False) -> bool:
 def run_tests_traced_docker(
     instance: Instance,
     test_ids: list[str],
-    force_rebuild: bool = False,
+    force_rebuild: bool ,
     target_files: list[Path] = None,
 ) -> RunResult:
     """
-    Exécute les tests dans un conteneur Docker local.
+    Exécute les tests dans un conteneur Docker local, à partir de l'image
+    sweb.eval.<instance_id> (construite par build_image() si besoin).
 
     IMPORTANT (Windows + WSL2) : on n'utilise PAS de montage de volume (-v),
     car les dossiers créés par tempfile ont des permissions que Docker Desktop
@@ -153,7 +288,7 @@ def run_tests_traced_docker(
     avec `docker cp`, on exécute avec `docker exec`, puis on récupère
     trace_rows.json avec `docker cp`. Cette approche marche aussi sur Linux/Mac.
     """
-    image = _image_name(instance.instance_id)
+    image = _eval_image_name(instance.instance_id)
     package_name = instance.repo.split("/")[1]
     watch_dir_in_container = f"/repo/{package_name}"
 
@@ -209,7 +344,7 @@ def run_tests_traced_docker(
         find_python = (
             "PYTHON=; "
             "for _py in "
-            "/opt/conda/envs/testenv/bin/python "
+            "/opt/conda/envs/testbed/bin/python "
             "python3.13 python3.12 python3.11 python3.10 python3.9 "
             "python3.8 python3.7 python3.6 python3 python; do "
             "  if command -v $_py >/dev/null 2>&1 && "

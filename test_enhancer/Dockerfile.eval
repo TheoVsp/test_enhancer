@@ -1,0 +1,56 @@
+# sweb.eval.<instance_id>
+#
+# One image per instance: clones the repo, pins it to base_commit, runs any
+# repo-specific pre_install steps, then the editable install. Built on top
+# of the shared sweb.env.<repo>.<version>.<hash> image for that instance.
+#
+# Patches (gold/agent + test) are still applied at *runtime*, not baked in
+# here — see docker_runner.run_tests_traced_docker(). That's what lets this
+# layer be reused unchanged across repeated runs of the same instance.
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG REPO
+ARG BASE_COMMIT
+ARG PRE_INSTALL="true"
+ARG INSTALL_CMD="python -m pip install -e ."
+
+ENV PATH=/opt/conda/envs/testbed/bin:$PATH
+
+# Recent GCC (14+) turns some old-C-API mismatches (common in older Cython-
+# generated extensions built against older numpy) from warnings into hard
+# errors: incompatible pointer types, implicit function declarations. These
+# repos compiled fine under the GCC available when they were released, so
+# demote both back to warnings rather than chasing a pinned-but-soon-to-be-
+# retired base image tag.
+ENV CFLAGS="-Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
+ENV CXXFLAGS="${CFLAGS}"
+
+# ── Clone & pin to base_commit ───────────────────────────────────────────────
+# Full clone (not shallow) so setuptools_scm / versioneer can resolve
+# __version__ from git tag history during install. Remote is dropped after
+# checkout to prevent accidental fetches and keep `git diff` limited to the
+# patch applied at runtime.
+RUN git clone https://github.com/${REPO}.git /repo \
+    && cd /repo \
+    && git reset --hard ${BASE_COMMIT} \
+    && git remote remove origin
+
+WORKDIR /repo
+
+# ── Repo-specific pre-install steps (sed patches, locale-gen, etc.) ─────────
+# These need the repo checked out, which is why they live here and not in
+# the env layer.
+RUN bash -c "${PRE_INSTALL}"
+
+# ── Editable install into the testbed env ────────────────────────────────────
+RUN conda run -n testbed bash -c "${INSTALL_CMD}"
+
+# ── Baseline commit so later `git diff` only shows the applied patch ────────
+RUN git config user.email "eval@local" \
+    && git config user.name "eval" \
+    && git add -A \
+    && git commit -m "baseline" --allow-empty
+
+WORKDIR /repo

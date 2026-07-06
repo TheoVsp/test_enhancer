@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from pathlib import Path
 
 from . import artifacts, enhancer, evaluate, planner, swe_runner, validate, docker_runner
@@ -56,7 +57,12 @@ def _safe_dir_name(test_id: str) -> str:
     Ex. 'sympy/test_foo.py::TestClass::test_bar' -> 'sympy__test_foo.py__TestClass__test_bar'
     """
     safe = re.sub(r"[^\w.\-]", "__", test_id)
-    return safe[:120]
+    leaf = test_id.split("::")[-1]
+    leaf_safe = re.sub(r"[^\w.\-]", "__", leaf)[:40]
+ 
+    digest = hashlib.sha1(safe.encode("utf-8")).hexdigest()[:10]
+ 
+    return f"{leaf_safe}__{digest}"
 
 
 def _save_test_artifacts(
@@ -192,7 +198,7 @@ def run_pipeline(
         if use_docker:
             result = docker_runner.run_single_test_traced_docker(
                 instance, test_id,
-                force_rebuild=False,          # image déjà construite
+                force_rebuild=force_rebuild,          # image déjà construite
                 target_files=patched_paths,
             )
         else:
