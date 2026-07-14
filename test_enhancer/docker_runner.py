@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import os
 from pathlib import Path
 
 from .dataset import Instance
@@ -51,6 +52,21 @@ DOCKERFILE_EVAL = TRACER_INJECT_DIR / "Dockerfile.eval"
 
 BASE_IMAGE = "sweb.base:latest"
 
+# ── Django instance ──────────────────────────────────────────────────────
+def _is_django(instance: Instance) -> bool:
+    return instance.repo == "django/django"
+
+_DJANGO_UNITTEST_RE = re.compile(r"^(?P<method>\w+)\s+\((?P<path>[\w\.]+)\)$")
+
+
+def _to_django_label(raw_id: str) -> str:
+    """'test_id (app.tests.TestClass)' -> 'app.tests.TestClass.test_id'.
+     Converts it into the label format tests/runtests.py expects on argv.
+    """
+    m = _DJANGO_UNITTEST_RE.match(raw_id.strip())
+    if not m:
+        return raw_id.strip()  # already dotted/label form, leave as-is
+    return f"{m.group('path')}.{m.group('method')}"
 
 # ── Helpers génériques ──────────────────────────────────────────────────────
 
@@ -94,10 +110,6 @@ def _unix_text(text: str) -> str:
 def _extra_env(instance: Instance) -> list[str]:
     """Returns docker run flags for repos that need special env vars."""
     env = []
-    if instance.repo == "django/django":
-        env += ["-w", "/repo"]
-        env += ["-e", "PYTHONPATH=/repo"]
-        env += ["-e", "DJANGO_SETTINGS_MODULE=tests.test_sqlite"]
     return env
 
 
@@ -325,7 +337,7 @@ def run_tests_traced_docker(
         shutil.copy(TRACER_INJECT_DIR / "tracer.py",        tmp_path / "tracer.py")
         shutil.copy(TRACER_INJECT_DIR / "config.py",        tmp_path / "config.py")
         shutil.copy(TRACER_INJECT_DIR / "runner_inside.py", tmp_path / "runner_inside.py")
-
+        shutil.copy(TRACER_INJECT_DIR / "sitecustomize.py", tmp_path / "sitecustomize.py")
         # 3. Commande shell dans le conteneur (chemins /tracer_inject -> /tmp/tracer_inject)
         def _apply(fname: str) -> str:
             return (
@@ -356,22 +368,39 @@ def run_tests_traced_docker(
             'if [ -z "$PYTHON" ]; then echo "[runner] No Python 3 found" >&2; exit 1; fi; '
             'echo "[runner] using $PYTHON" >&2'
         )
+        if _is_django(instance):
+            labels=[_to_django_label(id) for id in test_ids]
+            quoted_labels="".join(f"'{l}'" for l in labels)
+            target_files_env=(
+                os.pathsep.join(f"/repo/{tf}" for tf in target_files) 
+                                if target_files else ""
+            )
+            runner_cmd = (
+                find_python + " && "
+                "export "
+                f"TE_WATCH_DIR={watch_dir_in_container} "
+                "TE_TRACE_OUT=/tmp/tracer_inject/trace_rows.json "
+                f"TE_TARGET_FILES='{target_files_env}' "
+                "PYTHONPATH=/tmp/tracer_inject:${PYTHONPATH} && "
+                f"$PYTHON tests/runtests.py --settings=test_sqlite "
+                f"--parallel 1 --verbosity 2 {quoted_labels}"
+            )
+        else:     
+            quoted_ids = " ".join(f"'{tid}'" for tid in test_ids)
+            target_args = ""
+            if target_files:
+                abs_targets   = [f"/repo/{tf}" for tf in target_files]
+                quoted_targets = " ".join(f"'{t}'" for t in abs_targets)
+                target_args    = f" --target-files {quoted_targets}"
 
-        quoted_ids = " ".join(f"'{tid}'" for tid in test_ids)
-        target_args = ""
-        if target_files:
-            abs_targets   = [f"/repo/{tf}" for tf in target_files]
-            quoted_targets = " ".join(f"'{t}'" for t in abs_targets)
-            target_args    = f" --target-files {quoted_targets}"
-
-        runner_cmd = (
-            find_python + " && "
-            "$PYTHON /tmp/tracer_inject/runner_inside.py "
-            f"{watch_dir_in_container} "
-            f"/tmp/tracer_inject/trace_rows.json "
-            + quoted_ids
-            + target_args
-        )
+            runner_cmd = (
+                find_python + " && "
+                "$PYTHON /tmp/tracer_inject/runner_inside.py "
+                f"{watch_dir_in_container} "
+                f"/tmp/tracer_inject/trace_rows.json "
+                + quoted_ids
+                + target_args
+            )
 
         full_cmd = f"{patch_cmd} && {runner_cmd}"
 
@@ -392,7 +421,7 @@ def run_tests_traced_docker(
             # 5. Copier les fichiers dans le conteneur (sous /tmp/tracer_inject)
             _drun(["docker", "exec", container_name, "mkdir", "-p", "/tmp/tracer_inject"])
             for fname in ("gold.patch", "test.patch", "tracer.py", "config.py",
-                          "runner_inside.py"):
+                          "runner_inside.py", "sitecustomize.py"):
                 _drun(["docker", "cp", str(tmp_path / fname),
                        f"{container_name}:/tmp/tracer_inject/{fname}"])
 

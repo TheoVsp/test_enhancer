@@ -172,8 +172,12 @@ def run_pipeline(
     # ------------------------------------------------------------------
     # 3. Résoudre les node ids pour les deux suites
     # ------------------------------------------------------------------
-    f2p_ids = swe_runner.resolve_node_ids(instance.fail_to_pass, instance.test_patch)
-    p2p_ids = swe_runner.resolve_node_ids(instance.pass_to_pass,  instance.test_patch)
+    if instance.repo== "django/django":
+        f2p_ids = list(instance.fail_to_pass)
+        p2p_ids = list(instance.pass_to_pass)
+    else:
+        f2p_ids = swe_runner.resolve_node_ids(instance.fail_to_pass, instance.test_patch)
+        p2p_ids = swe_runner.resolve_node_ids(instance.pass_to_pass,  instance.test_patch)
 
     all_tests: list[tuple[str, str]] = (
         [("FAIL_TO_PASS", tid) for tid in f2p_ids]

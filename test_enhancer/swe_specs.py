@@ -125,7 +125,7 @@ SPECS_DJANGO: dict[str, dict] = {
     for k in ["1.7", "1.8", "1.9", "1.10", "1.11", "2.0", "2.1", "2.2"]
 }
 SPECS_DJANGO.update({
-    k: {"python": "3.6", "packages": "requirements.txt",
+    k: {"python": "3.6", "packages": "tests/requirements/py3.txt",
         "install": "python -m pip install -e .", "test_cmd": _TEST_DJANGO}
     for k in ["3.0", "3.1", "3.2"]
 })
