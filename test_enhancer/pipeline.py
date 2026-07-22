@@ -158,17 +158,29 @@ def run_pipeline(
     # 2. Préparer le repo
     # ------------------------------------------------------------------
     print("[2] Préparation du repo (clone + patch)...")
-    repos_root = WORK_DIR / "_repos"
-    repo_dir = swe_runner.prepare_repo(instance, repos_root)
-    swe_runner.install_repo(repo_dir)
+    container_name = None
+    if use_docker:
+        print("[2] Démarrage du conteneur persistant (Docker)...")
+        container_name = docker_runner.start_persistent_container(instance, force_rebuild=force_rebuild)
+        if container_name is None:
+            raise RuntimeError("Impossible de démarrer le conteneur Docker.")
+        repo_dir = None  # no host repo needed anymore
+    else:
+        print("[2] Préparation du repo (clone + patch)...")
+        repos_root = WORK_DIR / "_repos"
+        repo_dir = swe_runner.prepare_repo(instance, repos_root)
+        swe_runner.install_repo(repo_dir)
 
     patched_names, patched_paths = _get_patched_files(instance.gold_patch)
 
-    # Pre-build Docker image once (if needed) so per-test runs reuse it.
+# fetch patched source files back to host ONLY for annotation
+    local_sources_dir = out_dir / "_container_sources"
     if use_docker:
-        print("    [DOCKER] pré-construction de l'image (si nécessaire)...")
-        docker_runner.build_image(instance, force_rebuild=force_rebuild)
-
+        for rel_path in patched_paths:
+            docker_runner.copy_from_container(
+                container_name, f"/repo/{rel_path}", local_sources_dir / rel_path
+            )
+    
     # ------------------------------------------------------------------
     # 3. Résoudre les node ids pour les deux suites
     # ------------------------------------------------------------------
@@ -200,10 +212,8 @@ def run_pipeline(
         print(f"    [{idx}/{len(all_tests)}] {suite}  {test_id}")
 
         if use_docker:
-            result = docker_runner.run_single_test_traced_docker(
-                instance, test_id,
-                force_rebuild=force_rebuild,          # image déjà construite
-                target_files=patched_paths,
+            result = docker_runner.run_test_in_container(
+            container_name, instance, [test_id], target_files=patched_paths
             )
         else:
             result = swe_runner.run_single_test_traced(
@@ -314,15 +324,24 @@ def run_pipeline(
               f"Delta fonctions de test={delta['n_test_functions']:+d}")
 
         print("[9] Validation + réparation (tests qui ne tournent pas)...")
-        outcome = validate.validate_with_repair(
-            repo_dir=repo_dir,
-            enhanced_tests=enh.enhanced_tests,
-            annotated_code=annotated,
-            base_test_path=base_test_path or None,
-            max_iterations=3,
-        )
+        if use_docker:
+            outcome = validate.validate_with_repair_docker(
+                container_name=container_name,
+                docker_runner_module=docker_runner,
+                enhanced_tests=enh.enhanced_tests,
+                annotated_code=annotated,
+                base_test_path=base_test_path or None,
+                max_iterations=3,
+                )
+        else:
+            outcome = validate.validate_with_repair(
+                repo_dir=repo_dir, enhanced_tests=enh.enhanced_tests,
+                annotated_code=annotated, base_test_path=base_test_path or None,
+                max_iterations=3,
+                )
+            
         v = outcome.result
-        print(f"    -> {v.n_passed} passent, {v.n_assertion_fails} échouent (assertion), "
+        print(f"    ->{v.n_passed} passent, {v.n_assertion_fails} échouent (assertion), "
               f"{v.n_run_errors} ne tournent pas  |  réparations: {outcome.iterations}")
         if outcome.has_assertion_failures:
             print(f"    [!] {v.n_assertion_fails} test(s) échouent sur assertion "
@@ -344,7 +363,7 @@ def run_pipeline(
             encoding="utf-8",
         )
         print("    -> log de validation écrit : validation_log.txt")
-
+        print(repo_dir)
         (out_dir / "analysis.json").write_text(
             json.dumps(
                 {
@@ -369,3 +388,6 @@ def run_pipeline(
 
     print(f"=== Terminé. Artefacts dans {out_dir} ===")
     return out_dir
+
+    if container_name:
+        docker_runner.stop_container(container_name)

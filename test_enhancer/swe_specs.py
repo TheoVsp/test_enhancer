@@ -90,7 +90,7 @@ SPECS_SYMPY: dict[str, dict] = {
     k: {
         "python": "3.9",
         "packages": "mpmath flake8",
-        "pip_packages": ["mpmath==1.3.0", "flake8-comprehensions"],
+        "pip_packages": ["mpmath==1.3.0", "flake8-comprehensions", "pytest"],
         "install": "python -m pip install -e .",
         "test_cmd": _TEST_SYMPY,
     }
@@ -102,7 +102,7 @@ SPECS_SYMPY.update({
         "python": "3.9",
         "packages": "requirements.txt",
         "install": "python -m pip install -e .",
-        "pip_packages": ["mpmath==1.3.0"],
+        "pip_packages": ["mpmath==1.3.0", "pytest"],
         "test_cmd": _TEST_SYMPY,
     }
     for k in ["1.13", "1.14"]
@@ -112,7 +112,7 @@ SPECS_SYMPY.update({
 SPECS_DJANGO: dict[str, dict] = {
     k: {
         "python": "3.5",
-        "packages": "requirements.txt",
+        "packages": "tests/requirements/py3.txt",
         "pre_install": [
             "apt-get update && apt-get install -y locales",
             "echo 'en_US UTF-8' > /etc/locale.gen",
@@ -130,17 +130,17 @@ SPECS_DJANGO.update({
     for k in ["3.0", "3.1", "3.2"]
 })
 SPECS_DJANGO.update({
-    k: {"python": "3.8", "packages": "requirements.txt",
+    k: {"python": "3.8", "packages": "tests/requirements/py3.txt",
         "install": "python -m pip install -e .", "test_cmd": _TEST_DJANGO}
     for k in ["4.0"]
 })
 SPECS_DJANGO.update({
-    k: {"python": "3.9", "packages": "requirements.txt",
+    k: {"python": "3.9", "packages": "tests/requirements/py3.txt",
         "install": "python -m pip install -e .", "test_cmd": _TEST_DJANGO}
     for k in ["4.1", "4.2"]
 })
 SPECS_DJANGO.update({
-    k: {"python": "3.11", "packages": "requirements.txt",
+    k: {"python": "3.11", "packages": "tests/requirements/py3.txt",
         "install": "python -m pip install -e .", "test_cmd": _TEST_DJANGO}
     for k in ["5.0", "5.1", "5.2"]
 })
@@ -152,7 +152,7 @@ SPECS_FLASK: dict[str, dict] = {
         "install": "python -m pip install -e .",
         "pip_packages": ["setuptools==70.0.0", "Werkzeug==2.3.7",
                          "Jinja2==3.0.1", "itsdangerous==2.1.2",
-                         "click==8.0.1", "MarkupSafe==2.1.3"],
+                         "click==8.0.1", "MarkupSafe==2.1.3", "pytest"],
         "test_cmd": _TEST_PYTEST,
     },
     "2.1": {
@@ -160,7 +160,7 @@ SPECS_FLASK: dict[str, dict] = {
         "install": "python -m pip install -e .",
         "pip_packages": ["setuptools==70.0.0", "click==8.1.3",
                          "itsdangerous==2.1.2", "Jinja2==3.1.2",
-                         "MarkupSafe==2.1.1", "Werkzeug==2.3.7"],
+                         "MarkupSafe==2.1.1", "Werkzeug==2.3.7", "pytest"],
         "test_cmd": _TEST_PYTEST,
     },
 }
@@ -170,7 +170,7 @@ SPECS_FLASK.update({
         "install": "python -m pip install -e .",
         "pip_packages": ["setuptools==70.0.0", "click==8.1.3",
                          "itsdangerous==2.1.2", "Jinja2==3.1.2",
-                         "MarkupSafe==2.1.1", "Werkzeug==2.3.7"],
+                         "MarkupSafe==2.1.1", "Werkzeug==2.3.7", "pytest"],
         "test_cmd": _TEST_PYTEST,
     }
     for k in ["2.2", "2.3", "3.0", "3.1"]
@@ -233,7 +233,7 @@ _MPL_PKGS_NEW = [
     "ghostscript", "kiwisolver==1.4.5", "numpy==1.25.2",
     "packaging==23.1", "pillow==10.0.0", "pikepdf", "pyparsing==3.0.9",
     "python-dateutil==2.8.2", "six==1.16.0", "setuptools==68.1.2",
-    "setuptools-scm==7.1.0", "typing-extensions==4.7.1",
+    "setuptools-scm==7.1.0", "typing-extensions==4.7.1", "pytest",
 ]
 SPECS_MATPLOTLIB: dict[str, dict] = {
     k: {
@@ -292,7 +292,7 @@ SPECS_SEABORN.update({
 SPECS_SPHINX: dict[str, dict] = {
     k: {
         "python": "3.9",
-        "pip_packages": ["tox==4.16.0", "tox-current-env==0.0.11", "Jinja2==3.0.3"],
+        "pip_packages": ["tox==4.16.0", "tox-current-env==0.0.11", "Jinja2==3.0.3", "pytest"],
         "install": "python -m pip install -e .[test]",
         "pre_install": ["sed -i 's/pytest/pytest -rA/' tox.ini"],
         "test_cmd": _TEST_SPHINX,
@@ -353,7 +353,7 @@ SPECS_PVLIB: dict[str, dict] = {
     k: {
         "python": "3.9",
         "install": "python -m pip install -e .[test]",
-        "pip_packages": ["scipy", "pandas", "numpy"],
+        "pip_packages": ["scipy", "pandas", "numpy", "pytest"],
         "test_cmd": _TEST_PYTEST,
     }
     for k in ["0.9", "0.10", "0.11"]
@@ -389,17 +389,19 @@ SPECS_PYLINT: dict[str, dict] = {
     k: {
         "python": "3.9", "packages": "requirements.txt",
         "install": "python -m pip install -e .", "test_cmd": _TEST_PYTEST,
+        "pip_packages": ["pytest"],
     }
     for k in ["2.8", "2.9", "2.10", "2.11", "2.13", "2.14", "2.15",
                "2.16", "2.17", "3.0", "3.1", "3.2", "3.3", "4.0"]
 }
 for k in ["3.0", "3.1", "3.2", "3.3", "4.0"]:
-    SPECS_PYLINT[k]["pip_packages"] = ["astroid==3.0.0a6", "setuptools"]
+    SPECS_PYLINT[k]["pip_packages"] = ["astroid==3.0.0a6", "setuptools", "pytest"]
 
 SPECS_ASTROID: dict[str, dict] = {
     k: {
         "python": "3.9", "packages": "requirements.txt",
         "install": "python -m pip install -e .", "test_cmd": _TEST_PYTEST,
+        "pip_packages": ["pytest"],
     }
     for k in ["2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11",
                "2.12", "2.13", "2.14", "2.15", "3.0", "3.1", "3.2"]
@@ -410,6 +412,7 @@ SPECS_SQLFLUFF: dict[str, dict] = {
     k: {
         "python": "3.9", "packages": "requirements.txt",
         "install": "python -m pip install -e .", "test_cmd": _TEST_PYTEST,
+        "pip_packages": ["pytest"],
     }
     for k in ["0.4", "0.5", "0.6", "0.8", "0.9", "0.10", "0.11", "0.12",
                "0.13", "1.0", "1.1", "1.2", "1.3", "1.4", "2.0", "2.1", "2.2"]

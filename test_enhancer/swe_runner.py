@@ -22,6 +22,7 @@ instances sympy, flask, requests).
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -29,6 +30,26 @@ from pathlib import Path
 
 from .dataset import Instance
 from .tracer import VariableTracer
+
+
+# ── Django instance ──────────────────────────────────────────────────────────────────────
+def _is_django(instance: Instance) -> bool:
+    return instance.repo == "django/django"
+
+
+_DJANGO_UNITTEST_RE = re.compile(r"^(?P<method>\w+)\s+\((?P<path>[\w\.]+)\)$")
+
+
+def _to_django_label(raw_id: str) -> str:
+    """'test_id (app.tests.TestClass)' -> 'app.tests.TestClass.test_id'.
+
+    Convertit un FAIL_TO_PASS Django au format attendu par
+    tests/runtests.py (label pointé), au lieu d'un node id pytest.
+    """
+    m = _DJANGO_UNITTEST_RE.match(raw_id.strip())
+    if not m:
+        return raw_id.strip()  # déjà au format label pointé, laissé tel quel
+    return f"{m.group('path')}.{m.group('method')}"
 
 
 @dataclass
@@ -156,13 +177,50 @@ def _get_watch_dir(repo_dir: Path) -> Path:
         return src_layout
     return repo_dir
 
-def run_tests_traced(repo_dir: Path, test_ids: list[str], target_files: list[Path]=None) -> RunResult:
+def _run_django_tests(repo_dir: Path, test_ids: list[str]) -> RunResult:
+    """Exécute les tests Django via tests/runtests.py (pas pytest).
+
+    Django a son propre test runner et ses labels ne sont pas des node ids
+    pytest ('app.tests.TestClass.test_id' au lieu de 'path.py::test_id').
+    Contrairement à la version Docker, le tracer n'est PAS injecté ici pour
+    la V1 (pas de sitecustomize/PYTHONPATH runtime) : ce wrapper local sert
+    surtout à valider que les FAIL_TO_PASS passent, sans trace de variables.
+    """
+    labels = [_to_django_label(tid) for tid in test_ids]
+    cmd = [
+        sys.executable, "tests/runtests.py",
+        "--settings=test_sqlite", "--parallel", "1", "--verbosity", "2",
+        *labels,
+    ]
+    result = _run(cmd, cwd=repo_dir, check=False)
+    return RunResult(
+        success=(result.returncode == 0),
+        repo_dir=repo_dir,
+        tracer=None,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def run_tests_traced(
+    repo_dir: Path,
+    test_ids: list[str],
+    target_files: list[Path] = None,
+    instance: Instance | None = None,
+) -> RunResult:
     """Exécute les tests donnés sous le tracer de variables.
 
     On utilise pytest en l'important programmatiquement et on injecte un
     plugin à la volée pour n'activer le tracer QUE pendant l'exécution
     du test (ignorant ainsi tout le bruit d'importation des modules).
+
+    Si `instance` est fourni et correspond à django/django, on bascule sur
+    tests/runtests.py (voir docker_runner.py pour l'équivalent en conteneur),
+    car pytest ne sait pas exécuter la suite de tests Django telle quelle.
     """
+    if _is_django(instance):
+        return _run_django_tests(repo_dir, test_ids)
+
     watch_dir = _get_watch_dir(repo_dir)
     abs_target= None
     if target_files is not None:
@@ -215,6 +273,7 @@ def run_single_test_traced(
     repo_dir: Path,
     test_id: str,
     target_files: list[Path] = None,
+    instance: Instance | None = None,
 ) -> RunResult:
     """Wrapper : trace UN seul test (pendant local de
     run_single_test_traced_docker). Réutilise run_tests_traced avec une
@@ -223,5 +282,5 @@ def run_single_test_traced(
         repo_dir=repo_dir,
         test_ids=[test_id],
         target_files=target_files,
+        instance=instance,
     )
-    

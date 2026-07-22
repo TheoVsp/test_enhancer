@@ -476,3 +476,156 @@ def run_single_test_traced_docker(
         force_rebuild=force_rebuild,
         target_files=target_files,
     )
+
+
+def start_persistent_container(instance: Instance, force_rebuild: bool = False) -> str | None:
+    """Build the eval image if needed, start a long-lived container with the
+    gold + test patches already applied, and return its name. Caller must
+    call stop_container() when done. Everything downstream (tracing,
+    validation, kill-eval) runs docker exec against this one container."""
+    if not build_image(instance, force_rebuild=force_rebuild):
+        return None
+
+    image = _eval_image_name(instance.instance_id)
+    container_name = f"te_pipeline_{_slug(instance.instance_id)}"
+
+    def _drun(args):
+        return subprocess.run(args, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+
+    _drun(["docker", "rm", "-f", container_name])
+    start = _drun(["docker", "run", "-d", "--name", container_name,
+                   *_extra_env(instance), image, "sleep", "infinity"])
+    if start.returncode != 0:
+        print(f"    [DOCKER] échec démarrage conteneur persistant: {start.stderr[:500]}",
+              file=sys.stderr, flush=True)
+        return None
+
+    _drun(["docker", "exec", container_name, "mkdir", "-p", "/tmp/tracer_inject"])
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "gold.patch").write_text(_unix_text(instance.gold_patch),
+                                              encoding="utf-8", newline="\n")
+        (tmp_path / "test.patch").write_text(_unix_text(instance.test_patch),
+                                              encoding="utf-8", newline="\n")
+        for fname in ("gold.patch", "test.patch", "tracer.py", "config.py",
+                      "runner_inside.py", "sitecustomize.py"):
+            src = tmp_path / fname if fname.endswith(".patch") else TRACER_INJECT_DIR / fname
+            _drun(["docker", "cp", str(src), f"{container_name}:/tmp/tracer_inject/{fname}"])
+
+        patch_cmd = " && ".join([
+            "cd /repo",
+            "echo HEAD=$(git rev-parse HEAD)",
+            _apply_cmd("gold.patch"),
+            _apply_cmd("test.patch"),
+        ])
+        result = _drun(["docker", "exec", container_name, "/bin/bash", "-c", patch_cmd])
+        print(f"    [DOCKER] patches appliqués (code={result.returncode})",
+              file=sys.stderr, flush=True)
+        if result.returncode != 0:
+            print(f"    [DOCKER] stderr patch: {result.stderr[:500]}",
+                  file=sys.stderr, flush=True)
+
+    return container_name
+
+
+def _apply_cmd(fname: str) -> str:
+    return (
+        f"git apply /tmp/tracer_inject/{fname} --ignore-whitespace "
+        f"|| git apply /tmp/tracer_inject/{fname} --reject "
+        f"|| patch -p1 -f --ignore-whitespace < /tmp/tracer_inject/{fname}"
+    )
+
+
+def reset_and_apply(container_name: str, base_commit: str,
+                     code_patch: str, test_patch: str) -> subprocess.CompletedProcess:
+    """Used by docker kill-eval: git checkout -f + clean, then apply a given
+    code patch (gold OR agent) + test patch, inside the running container."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "code.patch").write_text(_unix_text(code_patch), encoding="utf-8", newline="\n")
+        (tmp_path / "test.patch").write_text(_unix_text(test_patch), encoding="utf-8", newline="\n")
+        for fname in ("code.patch", "test.patch"):
+            subprocess.run(["docker", "cp", str(tmp_path / fname),
+                            f"{container_name}:/tmp/tracer_inject/{fname}"],
+                           capture_output=True, text=True)
+    cmd = " && ".join([
+        "cd /repo",
+        f"git checkout -f {base_commit}",
+        "git clean -fdx",
+        _apply_cmd("code.patch"),
+        _apply_cmd("test.patch"),
+    ])
+    return exec_in_container(container_name, cmd)
+
+
+def exec_in_container(container_name: str, bash_cmd: str, cwd: str = "/repo") -> subprocess.CompletedProcess:
+    full = f"cd {cwd} && {bash_cmd}"
+    return subprocess.run(["docker", "exec", container_name, "/bin/bash", "-c", full],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def copy_from_container(container_name: str, container_path: str, host_path: Path) -> bool:
+    host_path.parent.mkdir(parents=True, exist_ok=True)
+    res = subprocess.run(["docker", "cp", f"{container_name}:{container_path}", str(host_path)],
+                          capture_output=True, text=True)
+    return res.returncode == 0
+
+
+def stop_container(container_name: str) -> None:
+    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, text=True)
+
+
+def run_test_in_container(container_name: str, instance: Instance,
+                           test_ids: list[str], target_files: list[Path] = None) -> RunResult:
+    """Same runner_cmd construction as run_tests_traced_docker, but against an
+    ALREADY RUNNING, already-patched container (no build/patch/teardown)."""
+    package_name = instance.repo.split("/")[1]
+    watch_dir_in_container = f"/repo/{package_name}"
+
+    find_python = (
+        "PYTHON=; for _py in /opt/conda/envs/testbed/bin/python "
+        "python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3 python; do "
+        "  if command -v $_py >/dev/null 2>&1 && "
+        '     $_py -c "import sys; sys.exit(0 if sys.version_info[0]==3 else 1)" >/dev/null 2>&1; then '
+        "    PYTHON=$_py; break; fi; done; "
+        'if [ -z "$PYTHON" ]; then echo "[runner] No Python 3 found" >&2; exit 1; fi'
+    )
+
+    if _is_django(instance):
+        labels = [_to_django_label(t) for t in test_ids]
+        quoted = "".join(f"'{l}'" for l in labels)
+        target_env = os.pathsep.join(f"/repo/{tf}" for tf in target_files) if target_files else ""
+        runner_cmd = (
+            find_python + " && export "
+            f"TE_WATCH_DIR={watch_dir_in_container} "
+            "TE_TRACE_OUT=/tmp/tracer_inject/trace_rows.json "
+            f"TE_TARGET_FILES='{target_env}' PYTHONPATH=/tmp/tracer_inject:${{PYTHONPATH}} && "
+            f"$PYTHON tests/runtests.py --settings=test_sqlite --parallel 1 --verbosity 2 {quoted}"
+        )
+    else:
+        quoted_ids = " ".join(f"'{t}'" for t in test_ids)
+        target_args = ""
+        if target_files:
+            quoted_targets = " ".join(f"'/repo/{tf}'" for tf in target_files)
+            target_args = f" --target-files {quoted_targets}"
+        runner_cmd = (
+            find_python + " && $PYTHON /tmp/tracer_inject/runner_inside.py "
+            f"{watch_dir_in_container} /tmp/tracer_inject/trace_rows.json {quoted_ids}{target_args}"
+        )
+
+    result = exec_in_container(container_name, runner_cmd)
+
+    rows = []
+    with tempfile.TemporaryDirectory() as tmp:
+        out_json = Path(tmp) / "trace_rows.json"
+        if copy_from_container(container_name, "/tmp/tracer_inject/trace_rows.json", out_json):
+            try:
+                rows = [TraceRow(**r) for r in json.loads(out_json.read_text(encoding="utf-8"))]
+            except Exception:
+                rows = []
+
+    tracer = VariableTracer(watch_dir=watch_dir_in_container, target_files=target_files)
+    tracer.rows = rows
+    return RunResult(success=(result.returncode == 0), repo_dir=Path("/repo"),
+                      tracer=tracer, stdout=result.stdout, stderr=result.stderr)

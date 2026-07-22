@@ -1,5 +1,5 @@
 """
-Évaluation "kill rate" — le cœur de la tâche d'évaluation (demande du prof).
+Évaluation "kill rate" — le cœur de la tâche d'évaluation.
 
 Question : les tests renforcés attrapent-ils des patches incorrects que les
 tests originaux laissaient passer ?
@@ -137,4 +137,45 @@ def evaluate_kill_for_instance(
             passed_on_gold=gold_results.get(name, False),
             passed_on_agent=agent_results.get(name, False),
         ))
+    return InstanceKillResult(instance_id=instance_id, verdicts=verdicts)
+
+##############################################################
+######  in the docker container     ##########################
+##############################################################
+
+def evaluate_kill_for_instance_docker(
+    instance_id: str,
+    enhanced_tests_path: Path,
+    instance_gold, instance_agent,
+    docker_runner_module,
+    validate_module,
+    container_name: str,
+    base_test_path: str | None = None,
+) -> InstanceKillResult:
+    enhanced = enhanced_tests_path.read_text(encoding="utf-8")
+
+    docker_runner_module.reset_and_apply(
+        container_name, instance_gold.base_commit,
+        instance_gold.patch_to_apply, instance_gold.test_patch,
+    )
+    res_gold = validate_module.validate_enhanced_tests_docker(
+        container_name, docker_runner_module, enhanced, base_test_path
+    )
+    gold_results = _per_test_results(res_gold.stdout)
+
+    docker_runner_module.reset_and_apply(
+        container_name, instance_agent.base_commit,
+        instance_agent.patch_to_apply, instance_agent.test_patch,
+    )
+    res_agent = validate_module.validate_enhanced_tests_docker(
+        container_name, docker_runner_module, enhanced, base_test_path
+    )
+    agent_results = _per_test_results(res_agent.stdout)
+
+    all_names = set(gold_results) | set(agent_results)
+    verdicts = [
+        TestVerdict(name=n, passed_on_gold=gold_results.get(n, False),
+                    passed_on_agent=agent_results.get(n, False))
+        for n in sorted(all_names)
+    ]
     return InstanceKillResult(instance_id=instance_id, verdicts=verdicts)

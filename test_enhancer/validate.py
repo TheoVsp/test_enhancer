@@ -198,7 +198,7 @@ def validate_enhanced_tests(
     # -rA : résumé de TOUS les tests (raison de passage/échec)
     # --tb=short : traceback court mais lisible (pour diagnostiquer les échecs)
     cmd = [sys.executable, "-m", "pytest", "-rA", "--tb=short", "--no-header",
-           "-p", "no:cacheprovider", str(enhanced_file)]
+           "-p", "no:cacheprovider","--assert=plain", str(enhanced_file)]
 
     success = False
     stdout = stderr = ""
@@ -370,3 +370,87 @@ def validate_with_repair(
         result=result,
         repaired=repaired,
     )
+
+
+##############################################################################
+######   Validation in the docker container                       ############
+##############################################################################
+
+def validate_enhanced_tests_docker(container_name: str, docker_runner_module,
+                                    enhanced_tests: str,
+                                    base_test_path: str | None = None) -> "ValidationResult":
+    notes: list[str] = []
+    syntax_ok, syntax_err = check_syntax(enhanced_tests)
+    if not syntax_ok:
+        notes.append(syntax_err)
+        return ValidationResult(syntax_ok=False, collected_ok=False, passed=False, notes=notes)
+
+    target_dir = f"/repo/{Path(base_test_path).parent.as_posix()}" if base_test_path else "/repo"
+    remote_file = f"{target_dir}/test_te_enhanced.py"
+
+    docker_runner_module.exec_in_container(container_name, f"mkdir -p {target_dir}")
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as f:
+        f.write(enhanced_tests)
+        local_tmp = f.name
+    subprocess.run(["docker", "cp", local_tmp, f"{container_name}:{remote_file}"],
+                   capture_output=True, text=True)
+    os.unlink(local_tmp)
+
+    find_python = (
+        "PYTHON=; for _py in /opt/conda/envs/testbed/bin/python python3; do "
+        "command -v $_py >/dev/null 2>&1 && PYTHON=$_py && break; done"
+    )
+    cmd = (find_python +
+           f" && $PYTHON -m pytest -rA --tb=short --no-header -p no:cacheprovider "
+           f"--assert=plain {remote_file}")
+    result = docker_runner_module.exec_in_container(container_name, cmd)
+    stdout, stderr = result.stdout, result.stderr
+
+    n_passed, n_failed, n_errors = _parse_pytest_counts(stdout)
+    n_run_errors, n_assertion_fails = _classify_failures(stdout)
+    collected_ok = (result.returncode in (0, 1)) and n_errors == 0
+    passed = (result.returncode == 0) and n_passed > 0 and n_failed == 0
+    if result.returncode >= 2:
+        notes.append("pytest n'a pas pu collecter/exécuter les tests dans le conteneur.")
+
+    docker_runner_module.exec_in_container(container_name, f"rm -f {remote_file}")
+
+    return ValidationResult(
+        syntax_ok=True, collected_ok=collected_ok, passed=passed,
+        n_passed=n_passed, n_failed=n_failed, n_errors=n_errors,
+        n_run_errors=n_run_errors, n_assertion_fails=n_assertion_fails,
+        stdout=stdout, stderr=stderr, test_file=remote_file, notes=notes,
+    )
+
+
+def validate_with_repair_docker(container_name: str, docker_runner_module,
+                                 enhanced_tests: str, annotated_code: str,
+                                 base_test_path: str | None = None,
+                                 max_iterations: int = 3) -> "RepairOutcome":
+    from . import enhancer
+
+    current = enhanced_tests
+    iterations = 0
+    repaired = False
+    result = validate_enhanced_tests_docker(container_name, docker_runner_module,
+                                             current, base_test_path)
+
+    while iterations < max_iterations:
+        run_errors = (result.n_errors > 0 or result.n_run_errors > 0
+                      or not result.collected_ok or not result.syntax_ok)
+        if not run_errors:
+            break
+        error_output = (result.stdout or "") + "\n" + (result.stderr or "")
+        fixed = enhancer.repair_tests(current, error_output, annotated_code)
+        iterations += 1
+        if not fixed.strip() or fixed.strip() == current.strip():
+            break
+        if _count_test_functions(fixed) < _count_test_functions(current):
+            break
+        current = fixed
+        repaired = True
+        result = validate_enhanced_tests_docker(container_name, docker_runner_module,
+                                                 current, base_test_path)
+
+    return RepairOutcome(final_tests=current, iterations=iterations,
+                          result=result, repaired=repaired)
