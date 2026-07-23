@@ -23,7 +23,7 @@ import os
 import re
 import time
 
-from .config import GEMINI_API_KEY, LLM_MODEL, LLM_TEMPERATURE
+from .config import GEMINI_API_KEY, LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS
 
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 LLM_BASE_URL = os.environ.get("TE_LLM_BASE_URL", DEFAULT_BASE_URL)
@@ -48,39 +48,72 @@ def extract_json(raw: str) -> dict:
       - JSON pur
       - blocs ```json ... ``` ou ``` ... ```
       - texte avant/après le JSON
+      - caractères de contrôle NON échappés dans les strings (vrais retours à
+        la ligne au lieu de \\n) -> strict=False, cas fréquent quand on demande
+        au modèle de mettre un fichier de code entier dans une string JSON.
     Renvoie {} si aucun JSON exploitable n'est trouvé.
     """
     if not raw or not raw.strip():
         return {}
-    # 0. Retirer les blocs de raisonnement <think>...</think> émis par les
-    #    modèles de raisonnement (ex. MiniMax-M2.x). Ces blocs contiennent
-    #    souvent des accolades qui trompent l'extraction du JSON.
+    # 0. Retirer les blocs de raisonnement <think>...</think>
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-    # Filet : si une balise <think> ouvrante traîne sans fermeture, on coupe
     raw = re.sub(r"<think>.*$", "", raw, flags=re.DOTALL)
     if not raw.strip():
         return {}
+
+    def _try(s: str) -> dict | None:
+        for strict in (True, False):
+            try:
+                return json.loads(s, strict=strict)
+            except json.JSONDecodeError:
+                continue
+        return None
+
     # 1. Parse direct (cas idéal)
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
+    parsed = _try(raw)
+    if parsed is not None:
+        return parsed
     # 2. Bloc Markdown ```json ... ``` ou ``` ... ```
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
     if fenced:
-        try:
-            return json.loads(fenced.group(1))
-        except json.JSONDecodeError:
-            pass
+        parsed = _try(fenced.group(1))
+        if parsed is not None:
+            return parsed
     # 3. Du premier { au dernier } (gère le texte avant/après)
     first = raw.find("{")
     last = raw.rfind("}")
     if first != -1 and last != -1 and last > first:
-        try:
-            return json.loads(raw[first:last + 1])
-        except json.JSONDecodeError:
-            pass
-    # 4. Échec
+        parsed = _try(raw[first:last + 1])
+        if parsed is not None:
+            return parsed
+    # 4. Derniers recours, dans l'ordre :
+    #    (a) dé-échappement : certains modèles double-échappent une PARTIE du
+    #        JSON (\" pour les guillemets, \n littéraux) comme si elle était
+    #        dans une string. On tente le candidat dé-échappé.
+    #    (b) json-repair : répare les défauts classiques des sorties LLM.
+    #    Aucun risque de faux positif : un candidat n'est accepté que si le
+    #    parse réussit ET produit un objet non vide.
+    candidate = raw[first:last + 1] if (first != -1 and last > first) else raw
+
+    unescaped = (candidate.replace('\\"', '"')
+                          .replace("\\n", "\n")
+                          .replace("\\t", "\t"))
+    if unescaped != candidate:
+        parsed = _try(unescaped)
+        if parsed:
+            return parsed
+
+    try:
+        from json_repair import repair_json
+        for cand in (candidate, unescaped):
+            repaired = repair_json(cand)
+            if repaired:
+                parsed = _try(repaired)
+                if parsed:
+                    return parsed
+    except Exception:  # noqa: BLE001
+        pass
+    # 5. Échec
     return {}
 
 
@@ -119,6 +152,7 @@ def call_json(system_prompt: str, user_prompt: str) -> tuple[dict, str]:
             response = client.chat.completions.create(
                 model=LLM_MODEL,
                 temperature=LLM_TEMPERATURE,
+                max_tokens=LLM_MAX_TOKENS,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},

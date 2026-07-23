@@ -35,6 +35,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # On change le modèle par défaut
 LLM_MODEL = os.environ.get("TE_LLM_MODEL", "MiniMax-M2.7")
 LLM_TEMPERATURE = 0.0  # déterministe pour la reproductibilité
+# Budget maximum de tokens de sortie par appel LLM. Les modèles de
+# raisonnement (MiniMax-M2.x) émettent un bloc <think> verbeux AVANT le JSON :
+# sans budget généreux, le JSON est tronqué par la limite par défaut du
+# serveur et le parsing échoue silencieusement.
+LLM_MAX_TOKENS = int(os.environ.get("TE_LLM_MAX_TOKENS", "16384"))
 
 # --- Tracing ---------------------------------------------------------------
 # Nombre maximum de lignes de trace qu'on garde par exécution de test
@@ -42,3 +47,6 @@ LLM_TEMPERATURE = 0.0  # déterministe pour la reproductibilité
 MAX_TRACE_ROWS = 20000
 # Longueur maximale de la représentation d'une valeur de variable.
 MAX_VALUE_REPR_LEN = 200
+# Nombre maximum d'itérations de la boucle d'enrichissement
+# (plan -> génération -> validation -> re-mesure de la couverture).
+MAX_ENHANCE_ITERATIONS = int(os.environ.get("TE_MAX_ENHANCE_ITERATIONS", "3"))
