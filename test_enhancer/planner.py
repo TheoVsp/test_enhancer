@@ -7,14 +7,16 @@ et comment les combler, en raisonnant avec les concepts établis du test
 logiciel (equivalence partitioning, boundary value analysis, branch coverage,
 edge cases).
 
+Nouveauté (phase "measured coverage") : le planner peut recevoir en plus une
+WEAKNESS MAP MESURÉE par coverage.py (lignes/branches jamais exécutées par la
+suite existante). Cette mesure est traitée comme la VÉRITÉ TERRAIN sur la
+couverture : le LLM doit prioritairement combler ces trous-là, et n'a pas le
+droit d'inventer des trous de couverture contredits par la mesure.
+
 Ce module produit deux choses :
   1. Un plan structuré (liste d'objectifs de test) -> consommé par enhancer.py.
   2. Un fichier Markdown lisible qui retranscrit le RAISONNEMENT du LLM :
      où il voit une faiblesse, et pourquoi. (demande explicite du prof)
-
-L'entrée correspond au « Input: test, vars, source code » du prof :
-  - les tests existants
-  - le tableau de variables + le code annoté (le « vars » + « source code »)
 """
 from __future__ import annotations
 
@@ -24,8 +26,7 @@ from . import llm_client
 
 
 # Concepts de test logiciel injectés dans le prompt (« keywords from software
-# testing literature » demandés par le prof). On les nomme explicitement pour
-# forcer le LLM à raisonner avec, plutôt qu'au hasard.
+# testing literature » demandés par le prof).
 TESTING_CONCEPTS = """\
 - Equivalence partitioning: split the input space into classes that should \
 behave the same, and make sure each class is covered by at least one test.
@@ -39,7 +40,8 @@ taking an unexpected value, a branch never visited, etc.)."""
 
 SYSTEM_PROMPT = f"""You are a software testing expert. You are given a Python \
 function, the runtime values its variables took during the EXISTING tests, and \
-the existing tests themselves.
+the existing tests themselves. You may ALSO be given a MEASURED coverage \
+report (produced by coverage.py in branch mode).
 
 Your job is NOT to write tests yet. Your job is to produce a TEST PLAN that \
 identifies where the existing test suite is WEAK and how to strengthen its \
@@ -49,20 +51,39 @@ assertions, cover only one branch, or be redundant.
 Reason explicitly using these software-testing concepts:
 {TESTING_CONCEPTS}
 
-Use the runtime trace to your advantage: it shows which values and branches \
-were ACTUALLY visited by the existing tests. Anything not visited is a \
-candidate gap.
+RULES ABOUT THE MEASURED COVERAGE REPORT (when present):
+1. The measured report is GROUND TRUTH. Every line or branch outcome it lists \
+as never executed is a REAL gap: your plan MUST contain at least one test \
+item targeting each of them, and each such item must cite the exact line \
+numbers it targets in its rationale.
+2. Do NOT claim a coverage gap that the measurement contradicts: if a line or \
+branch is not listed as missing, it is already executed by the existing \
+suite. Proposing a test for it is only justified on OTHER grounds (weak \
+assertions, equivalence classes, boundary values) — never as a coverage gap.
+3. You may and should go BEYOND the measured gaps with equivalence \
+partitioning and boundary value analysis, since 100% branch coverage does \
+not mean the assertions are strong.
+When a "Feedback from previous iterations" section is present, this is a \
+LATER iteration of an enhancement loop: only propose NEW items for the \
+remaining measured gaps, never duplicate a goal already generated, and when \
+a previous strategy failed to reach its target branch, analyse WHY (using \
+the code) and propose a structurally different strategy.
+
+Use the runtime trace to your advantage: it shows which VALUES the variables \
+actually took. The measured report tells you WHICH code was never run; the \
+trace tells you HOW the code that did run behaved.
 
 Respond ONLY with a JSON object of the form:
 {{
   "reasoning": "<your step-by-step thinking: where the suite is weak and WHY, \
-referencing the concepts above and the trace>",
+referencing the concepts above, the measured gaps, and the trace>",
   "test_plan": [
     {{
       "goal": "<what this test should verify>",
       "technique": "<one of: equivalence partitioning | boundary value \
 analysis | branch coverage | edge case>",
-      "rationale": "<why this matters / what gap it fills, based on the trace>",
+      "rationale": "<why this matters / what gap it fills; cite measured \
+line numbers when targeting a measured gap>",
       "inputs": "<concrete inputs to use>"
     }}
   ]
@@ -96,6 +117,7 @@ class TestPlan:
     reasoning: str
     items: list[TestPlanItem] = field(default_factory=list)
     raw_response: str = ""
+    coverage_summary: str = ""          # la weakness map mesurée (si fournie)
 
     def as_dict(self) -> dict:
         return {"reasoning": self.reasoning,
@@ -116,8 +138,22 @@ def _truncate_table(table: list[dict], max_rows: int = 300) -> str:
 
 
 def build_user_prompt(annotated_code: str, variable_table: list[dict],
-                      existing_tests: str) -> str:
-    return f"""## Annotated source code (runtime values inline)
+                      existing_tests: str,
+                      coverage_summary: str | None = None,
+                      feedback: str | None = None) -> str:
+    coverage_section = ""
+    if coverage_summary:
+        coverage_section = f"""## MEASURED coverage gaps (ground truth, from coverage.py --branch)
+{coverage_summary}
+
+"""
+    feedback_section = ""
+    if feedback:
+        feedback_section = f"""## Feedback from previous iterations
+{feedback}
+
+"""
+    return f"""{coverage_section}{feedback_section}## Annotated source code (runtime values inline)
 ```python
 {annotated_code}
 ```
@@ -134,27 +170,39 @@ Produce the test plan now."""
 
 
 def make_plan(annotated_code: str, variable_table: list[dict],
-              existing_tests: str) -> TestPlan:
-    """Demande au LLM un plan de test guidé par les concepts du test logiciel."""
-    user_prompt = build_user_prompt(annotated_code, variable_table, existing_tests)
+              existing_tests: str,
+              coverage_summary: str | None = None,
+              feedback: str | None = None) -> TestPlan:
+    """Demande au LLM un plan de test guidé par les concepts du test logiciel,
+    la weakness map mesurée, et le feedback des itérations précédentes."""
+    user_prompt = build_user_prompt(annotated_code, variable_table,
+                                    existing_tests, coverage_summary, feedback)
     parsed, raw = llm_client.call_json(SYSTEM_PROMPT, user_prompt)
     items = [TestPlanItem.from_dict(d) for d in parsed.get("test_plan", [])]
     return TestPlan(
         reasoning=parsed.get("reasoning", ""),
         items=items,
         raw_response=raw,
+        coverage_summary=coverage_summary or "",
     )
 
 
 def render_reasoning_markdown(plan: TestPlan, instance_id: str) -> str:
-    """Produit le fichier Markdown qui retranscrit le raisonnement du LLM.
-
-    C'est le « fichier qui retranscrit le schéma de pensée du LLM » demandé
-    par le prof : où il voit une faiblesse, et pourquoi.
-    """
+    """Produit le fichier Markdown qui retranscrit le raisonnement du LLM."""
     lines = [
         f"# Test plan reasoning — {instance_id}",
         "",
+    ]
+    if plan.coverage_summary:
+        lines += [
+            "## Measured coverage gaps (input to the LLM)",
+            "",
+            "```",
+            plan.coverage_summary,
+            "```",
+            "",
+        ]
+    lines += [
         "## Where the LLM sees weaknesses (and why)",
         "",
         plan.reasoning.strip() or "_(no reasoning returned)_",

@@ -28,8 +28,8 @@ import json
 import re
 from pathlib import Path
 
-from . import artifacts, enhancer, evaluate, planner, swe_runner, validate, docker_runner
-from .config import WORK_DIR
+from . import artifacts, enhancer, evaluate, planner, swe_runner, validate, docker_runner, loop
+from .config import WORK_DIR, MAX_ENHANCE_ITERATIONS
 from .dataset import Instance, get_instance
 from .tracer import TraceRow
 
@@ -276,59 +276,73 @@ def run_pipeline(
         existing_tests = instance.test_patch
         annotated = aggregated_annotated_main or "(pas de code tracé)"
 
-        print("[6] Plan de test (concepts du test logiciel)...")
-        plan = planner.make_plan(
-            annotated_code=annotated,
-            variable_table=agg_table,
+        # --- 5bis. Weakness map mesurée (coverage.py) ---------------------
+        coverage_summary = None
+        if not use_docker:
+            print("[5bis] Mesure de la branch coverage de la suite existante...")
+            try:
+                import coverage_probe
+                cov = coverage_probe.measure_on_prepared_repo(
+                    repo_dir, f2p_ids + p2p_ids, patched_paths)
+                if cov["files"]:
+                    coverage_summary = coverage_probe.render_weakness_map(
+                        cov, repo_dir)
+                    (out_dir / "coverage_baseline.json").write_text(
+                        json.dumps(cov, indent=2), encoding="utf-8")
+                    n_miss = sum(len(e["missing_branches"])
+                                 for e in cov["files"].values())
+                    print(f"    -> {n_miss} branche(s) jamais prise(s) — "
+                          "weakness map injectée dans le planner")
+                else:
+                    print("    [!] aucun fichier patché mesuré — planner sans mesure")
+            except Exception as exc:
+                print(f"    [!] mesure coverage impossible ({exc}) — "
+                      "planner sans mesure")
+        else:
+            print("[5bis] (Docker : mesure coverage locale sautée pour l'instant)")
+
+        print("[6-9] Boucle d'enrichissement (plan -> génération -> "
+              "validation -> re-mesure)...")
+        loop_res = loop.run_enhancement_loop(
+            repo_dir=repo_dir, out_dir=out_dir,
+            node_ids=f2p_ids + p2p_ids, patched_paths=patched_paths,
+            annotated=annotated, agg_table=agg_table,
             existing_tests=existing_tests,
+            base_test_path=base_test_path,
+            max_iterations=MAX_ENHANCE_ITERATIONS,
         )
-        print(f"    -> {len(plan.items)} objectif(s) de test planifié(s)")
+        print(f"    -> arrêt: {loop_res.stop_reason} après "
+              f"{len(loop_res.records)} itération(s)")
+
+        if not loop_res.final_tests.strip():
+            raise RuntimeError(
+                "Boucle d'enrichissement terminée sans aucun test généré "
+                f"(raison: {loop_res.stop_reason}). Voir {out_dir}/llm_raw.")
+
+        plan = loop_res.last_plan
+        enh = loop_res.last_enh
+        outcome = loop_res.last_outcome
+        v = outcome.result
 
         reasoning_md = planner.render_reasoning_markdown(plan, instance_id)
-        (out_dir / "test_plan_reasoning.md").write_text(reasoning_md, encoding="utf-8")
-        print("    -> raisonnement écrit : test_plan_reasoning.md")
+        (out_dir / "test_plan_reasoning.md").write_text(reasoning_md,
+                                                        encoding="utf-8")
 
-        print("[7] Génération des tests à partir du plan...")
-        enh = enhancer.enhance_tests(
-            annotated_code=annotated,
-            variable_table=agg_table,
-            existing_tests=existing_tests,
-            plan=plan,
-        )
-        print(f"    analyse: {enh.analysis[:120]}...")
-
-        print("[8] Évaluation : comparaison tests originaux vs renforcés...")
-        metrics = evaluate.compare(existing_tests, enh.enhanced_tests)
+        metrics = evaluate.compare(existing_tests, loop_res.final_tests)
         delta = metrics["delta"]
         print(f"    Delta assertions={delta['n_assertions']:+d}  "
               f"Delta fonctions de test={delta['n_test_functions']:+d}")
-
-        print("[9] Validation + réparation (tests qui ne tournent pas)...")
-        outcome = validate.validate_with_repair(
-            repo_dir=repo_dir,
-            enhanced_tests=enh.enhanced_tests,
-            annotated_code=annotated,
-            base_test_path=base_test_path or None,
-            max_iterations=3,
-        )
-        v = outcome.result
-        print(f"    -> {v.n_passed} passent, {v.n_assertion_fails} échouent (assertion), "
-              f"{v.n_run_errors} ne tournent pas  |  réparations: {outcome.iterations}")
         if outcome.has_assertion_failures:
             print(f"    [!] {v.n_assertion_fails} test(s) échouent sur assertion "
-                  "-> GARDÉS et SIGNALÉS")
-        if outcome.has_run_errors:
-            print(f"    [!] Des tests ne tournent pas après "
-                  f"{outcome.iterations} tentative(s) de réparation.")
+                  "-> GARDÉS et SIGNALÉS (good-test-fail candidates)")
 
-        (out_dir / "enhanced_tests.py").write_text(outcome.final_tests, encoding="utf-8")
+        (out_dir / "enhanced_tests.py").write_text(loop_res.final_tests,
+                                                   encoding="utf-8")
         (out_dir / "validation_log.txt").write_text(
-            f"iterations de réparation: {outcome.iterations}  (repaired={outcome.repaired})\n"
+            f"stop_reason: {loop_res.stop_reason}\n"
+            f"iterations de réparation (dernière passe): {outcome.iterations}\n"
             f"syntax_ok={v.syntax_ok}  collected_ok={v.collected_ok}  passed={v.passed}\n"
             f"n_passed={v.n_passed}  n_failed={v.n_failed}  n_errors={v.n_errors}\n"
-            f"has_run_errors={outcome.has_run_errors}  "
-            f"has_assertion_failures={outcome.has_assertion_failures}\n"
-            f"notes={v.notes}\n"
             f"\n===== PYTEST STDOUT =====\n{v.stdout}\n"
             f"\n===== PYTEST STDERR =====\n{v.stderr}\n",
             encoding="utf-8",

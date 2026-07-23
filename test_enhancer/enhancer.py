@@ -26,6 +26,7 @@ item, write one or more tests that achieve its goal using the stated technique \
 and inputs.
 
 CRITICAL RULES TO AVOID WRONG EXPECTED VALUES (this is the main failure mode):
+- ONLY import names that actually EXIST. Do NOT invent classes, functions, or symbols. Every import must come from the existing tests, the annotated source code, or the standard public API you are certain of. A single hallucinated import (e.g. `from x import NonExistentClass`) makes the WHOLE test file fail to collect, destroying all other tests. When unsure whether a name exists, do NOT import it — reuse only what the existing tests already import.
 - Do NOT guess expected output formats. Many libraries have non-obvious output \
 conventions (ordering of terms, bracket styles, spacing). If you are not CERTAIN \
 of the exact expected value, derive it from the runtime trace, or from the \
@@ -97,17 +98,6 @@ def build_user_prompt(annotated_code: str, variable_table: list[dict],
 
 Write the tests that realise this plan now."""
 
-def _as_text(value) -> str:
-    """Force une valeur en chaîne (le LLM renvoie parfois analysis en dict/list
-    au lieu d'une string, ce qui casse les usages type analysis[:120])."""
-    if isinstance(value, str):
-        return value
-    import json as _json
-    try:
-        return _json.dumps(value, ensure_ascii=False)
-    except Exception:
-        return str(value)
-
 
 def enhance_tests(annotated_code: str, variable_table: list[dict],
                   existing_tests: str, plan: TestPlan) -> EnhancementResult:
@@ -116,7 +106,7 @@ def enhance_tests(annotated_code: str, variable_table: list[dict],
                                      existing_tests, plan)
     parsed, raw = llm_client.call_json(SYSTEM_PROMPT, user_prompt)
     return EnhancementResult(
-        analysis=_as_text(parsed.get("analysis", "")),
+        analysis=parsed.get("analysis", ""),
         enhanced_tests=parsed.get("enhanced_tests", ""),
         raw_response=raw,
     )
