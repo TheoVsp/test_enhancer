@@ -29,7 +29,7 @@ import re
 import hashlib
 from pathlib import Path
 
-from . import artifacts, enhancer, evaluate, planner, swe_runner, validate, docker_runner
+from . import artifacts, enhancer, evaluate, planner, swe_runner, validate, docker_runner, loop
 from .config import WORK_DIR
 from .dataset import Instance, get_instance
 from .tracer import TraceRow
@@ -125,7 +125,7 @@ def run_pipeline(
     instance_id: str,
     do_enhance: bool = True,
     use_docker: bool = False,
-    force_rebuild: bool = False,
+    force_rebuild: bool = True,
     use_agent_patch: bool | None = None,
 ) -> Path:
     """Exécute le pipeline complet sur une instance SWE-bench Lite.
@@ -290,104 +290,208 @@ def run_pipeline(
         base_test_path = test_files[0]
 
     # ------------------------------------------------------------------
-    # 6-9. Plan + génération + évaluation + validation (inchangé)
+    # 6-9. Plan + génération + évaluation + validation
+    #
+    # --docker : boucle d'enrichissement guidée par la couverture MESURÉE
+    #            (loop.run_enhancement_loop_docker) — plan -> enhancer ->
+    #            validate -> re-mesure de coverage DANS le conteneur, répété
+    #            jusqu'à max_iterations, plateau, ou couverture complète.
+    # local    : flux "single-shot" inchangé (un seul plan, une seule
+    #            génération, une seule validation/réparation).
     # ------------------------------------------------------------------
     if do_enhance:
         existing_tests = instance.test_patch
-        annotated = aggregated_annotated_main or "(pas de code tracé)"
+        annotated = aggregated_annotated_main or "(no traced code)"
 
-        print("[6] Plan de test (concepts du test logiciel)...")
-        plan = planner.make_plan(
-            annotated_code=annotated,
-            variable_table=agg_table,
-            existing_tests=existing_tests,
-        )
-        print(f"    -> {len(plan.items)} objectif(s) de test planifié(s)")
-
-        reasoning_md = planner.render_reasoning_markdown(plan, instance_id)
-        (out_dir / "test_plan_reasoning.md").write_text(reasoning_md, encoding="utf-8")
-        print("    -> raisonnement écrit : test_plan_reasoning.md")
-
-        print("[7] Génération des tests à partir du plan...")
-        enh = enhancer.enhance_tests(
-            annotated_code=annotated,
-            variable_table=agg_table,
-            existing_tests=existing_tests,
-            plan=plan,
-        )
-        print(f"    analyse: {enh.analysis[:120]}...")
-
-        print("[8] Évaluation : comparaison tests originaux vs renforcés...")
-        metrics = evaluate.compare(existing_tests, enh.enhanced_tests)
-        delta = metrics["delta"]
-        print(f"    Delta assertions={delta['n_assertions']:+d}  "
-              f"Delta fonctions de test={delta['n_test_functions']:+d}")
-
-        print("[9] Validation + réparation (tests qui ne tournent pas)...")
         if use_docker:
-            outcome = validate.validate_with_repair_docker(
+            print("[6-9] Boucle d'enrichissement guidée par la couverture "
+                  "(Docker)...")
+            node_ids = f2p_ids + p2p_ids
+            loop_result = loop.run_enhancement_loop_docker(
                 container_name=container_name,
                 docker_runner_module=docker_runner,
-                enhanced_tests=enh.enhanced_tests,
-                annotated_code=annotated,
-                base_test_path=base_test_path or None,
+                out_dir=out_dir,
+                node_ids=node_ids,
+                patched_paths=patched_paths,
+                local_sources_dir=local_sources_dir,
+                annotated=annotated,
+                agg_table=agg_table,
+                existing_tests=existing_tests,
+                base_test_path=base_test_path,
                 max_iterations=3,
-                )
+            )
+            print(f"    -> boucle terminée : stop_reason="
+                  f"{loop_result.stop_reason} ({len(loop_result.records)} "
+                  f"itération(s))")
+
+            plan = loop_result.last_plan
+            enh = loop_result.last_enh
+            outcome = loop_result.last_outcome
+
+            if plan is not None:
+                reasoning_md = planner.render_reasoning_markdown(plan, instance_id)
+                (out_dir / "test_plan_reasoning.md").write_text(
+                    reasoning_md, encoding="utf-8")
+                print("    -> raisonnement écrit : test_plan_reasoning.md")
+
+            if outcome is None:
+                # La boucle s'est arrêtée avant la première génération (ex.
+                # couverture déjà complète dès l'itération 1, ou plan vide
+                # renvoyé par le LLM) : rien de plus à valider/écrire.
+                print("    -> aucun test généré par la boucle "
+                      f"(stop_reason={loop_result.stop_reason}).")
+                (out_dir / "loop_stop_reason.txt").write_text(
+                    loop_result.stop_reason, encoding="utf-8")
+                print(f"=== Terminé. Artefacts dans {out_dir} ===")
+                if container_name:
+                    docker_runner.stop_container(container_name)
+                return out_dir
+
+            v = outcome.result
+            print(f"    ->{v.n_passed} passent, {v.n_assertion_fails} échouent (assertion), "
+                  f"{v.n_run_errors} ne tournent pas  |  réparations: {outcome.iterations}")
+            if outcome.has_assertion_failures:
+                print(f"    [!] {v.n_assertion_fails} test(s) échouent sur assertion "
+                      "-> GARDÉS et SIGNALÉS")
+            if outcome.has_run_errors:
+                print(f"    [!] Des tests ne tournent pas après "
+                      f"{outcome.iterations} tentative(s) de réparation.")
+
+            (out_dir / "enhanced_tests.py").write_text(outcome.final_tests, encoding="utf-8")
+
+            compliance_md = enhancer.render_compliance_markdown(
+                loop_result.all_traces, loop_result.all_compliance, instance_id)
+            (out_dir / "execution_traces_compliance.md").write_text(
+                compliance_md, encoding="utf-8")
+            print("    -> traces d'exécution + compliance check écrits : "
+                  "execution_traces_compliance.md")
+
+            print("[8] Évaluation : comparaison tests originaux vs renforcés...")
+            metrics = evaluate.compare(existing_tests, outcome.final_tests)
+            delta = metrics["delta"]
+            print(f"    Delta assertions={delta['n_assertions']:+d}  "
+                  f"Delta fonctions de test={delta['n_test_functions']:+d}")
+
+            (out_dir / "validation_log.txt").write_text(
+                f"iterations de réparation: {outcome.iterations}  (repaired={outcome.repaired})\n"
+                f"syntax_ok={v.syntax_ok}  collected_ok={v.collected_ok}  passed={v.passed}\n"
+                f"n_passed={v.n_passed}  n_failed={v.n_failed}  n_errors={v.n_errors}\n"
+                f"has_run_errors={outcome.has_run_errors}  "
+                f"has_assertion_failures={outcome.has_assertion_failures}\n"
+                f"notes={v.notes}\n"
+                f"loop_stop_reason={loop_result.stop_reason}\n"
+                f"\n===== PYTEST STDOUT =====\n{v.stdout}\n"
+                f"\n===== PYTEST STDERR =====\n{v.stderr}\n",
+                encoding="utf-8",
+            )
+            print("    -> log de validation écrit : validation_log.txt")
+
+            (out_dir / "analysis.json").write_text(
+                json.dumps(
+                    {
+                        "plan": plan.as_dict() if plan else {},
+                        "analysis": enh.analysis if enh else "",
+                        "enhanced_tests": outcome.final_tests,
+                        "metrics": metrics,
+                        "validation": v.as_dict(),
+                        "repair": {
+                            "iterations": outcome.iterations,
+                            "repaired": outcome.repaired,
+                            "has_run_errors": outcome.has_run_errors,
+                            "has_assertion_failures": outcome.has_assertion_failures,
+                        },
+                        "loop": {
+                            "stop_reason": loop_result.stop_reason,
+                            "records": loop_result.records,
+                        },
+                    },
+                    indent=2, ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
         else:
+            print("[6] Test Plan")
+            plan = planner.make_plan(
+                annotated_code=annotated,
+                variable_table=agg_table,
+                existing_tests=existing_tests,
+            )
+            print(f"    -> {len(plan.items)} objectif(s) de test planifié(s)")
+
+            reasoning_md = planner.render_reasoning_markdown(plan, instance_id)
+            (out_dir / "test_plan_reasoning.md").write_text(reasoning_md, encoding="utf-8")
+            print("    -> raisonnement écrit : test_plan_reasoning.md")
+
+            print("[7] Génération des tests à partir du plan...")
+            enh = enhancer.enhance_tests(
+                annotated_code=annotated,
+                variable_table=agg_table,
+                existing_tests=existing_tests,
+                plan=plan,
+            )
+            print(f"    analyse: {enh.analysis[:120]}...")
+
+            print("[8] Évaluation : comparaison tests originaux vs renforcés...")
+            metrics = evaluate.compare(existing_tests, enh.enhanced_tests)
+            delta = metrics["delta"]
+            print(f"    Delta assertions={delta['n_assertions']:+d}  "
+                  f"Delta fonctions de test={delta['n_test_functions']:+d}")
+
+            print("[9] Validation + réparation (tests qui ne tournent pas)...")
             outcome = validate.validate_with_repair(
                 repo_dir=repo_dir, enhanced_tests=enh.enhanced_tests,
                 annotated_code=annotated, base_test_path=base_test_path or None,
                 max_iterations=3,
-                )
-            
-        v = outcome.result
-        print(f"    ->{v.n_passed} passent, {v.n_assertion_fails} échouent (assertion), "
-              f"{v.n_run_errors} ne tournent pas  |  réparations: {outcome.iterations}")
-        if outcome.has_assertion_failures:
-            print(f"    [!] {v.n_assertion_fails} test(s) échouent sur assertion "
-                  "-> GARDÉS et SIGNALÉS")
-        if outcome.has_run_errors:
-            print(f"    [!] Des tests ne tournent pas après "
-                  f"{outcome.iterations} tentative(s) de réparation.")
+            )
 
-        (out_dir / "enhanced_tests.py").write_text(outcome.final_tests, encoding="utf-8")
-        (out_dir / "validation_log.txt").write_text(
-            f"iterations de réparation: {outcome.iterations}  (repaired={outcome.repaired})\n"
-            f"syntax_ok={v.syntax_ok}  collected_ok={v.collected_ok}  passed={v.passed}\n"
-            f"n_passed={v.n_passed}  n_failed={v.n_failed}  n_errors={v.n_errors}\n"
-            f"has_run_errors={outcome.has_run_errors}  "
-            f"has_assertion_failures={outcome.has_assertion_failures}\n"
-            f"notes={v.notes}\n"
-            f"\n===== PYTEST STDOUT =====\n{v.stdout}\n"
-            f"\n===== PYTEST STDERR =====\n{v.stderr}\n",
-            encoding="utf-8",
-        )
-        print("    -> log de validation écrit : validation_log.txt")
-        print(repo_dir)
-        (out_dir / "analysis.json").write_text(
-            json.dumps(
-                {
-                    "plan": plan.as_dict(),
-                    "analysis": enh.analysis,
-                    "enhanced_tests": outcome.final_tests,
-                    "metrics": metrics,
-                    "validation": v.as_dict(),
-                    "repair": {
-                        "iterations": outcome.iterations,
-                        "repaired": outcome.repaired,
-                        "has_run_errors": outcome.has_run_errors,
-                        "has_assertion_failures": outcome.has_assertion_failures,
+            v = outcome.result
+            print(f"    ->{v.n_passed} passent, {v.n_assertion_fails} échouent (assertion), "
+                  f"{v.n_run_errors} ne tournent pas  |  réparations: {outcome.iterations}")
+            if outcome.has_assertion_failures:
+                print(f"    [!] {v.n_assertion_fails} test(s) échouent sur assertion "
+                      "-> GARDÉS et SIGNALÉS")
+            if outcome.has_run_errors:
+                print(f"    [!] Des tests ne tournent pas après "
+                      f"{outcome.iterations} tentative(s) de réparation.")
+
+            (out_dir / "enhanced_tests.py").write_text(outcome.final_tests, encoding="utf-8")
+            (out_dir / "validation_log.txt").write_text(
+                f"iterations de réparation: {outcome.iterations}  (repaired={outcome.repaired})\n"
+                f"syntax_ok={v.syntax_ok}  collected_ok={v.collected_ok}  passed={v.passed}\n"
+                f"n_passed={v.n_passed}  n_failed={v.n_failed}  n_errors={v.n_errors}\n"
+                f"has_run_errors={outcome.has_run_errors}  "
+                f"has_assertion_failures={outcome.has_assertion_failures}\n"
+                f"notes={v.notes}\n"
+                f"\n===== PYTEST STDOUT =====\n{v.stdout}\n"
+                f"\n===== PYTEST STDERR =====\n{v.stderr}\n",
+                encoding="utf-8",
+            )
+            print("    -> log de validation écrit : validation_log.txt")
+            print(repo_dir)
+            (out_dir / "analysis.json").write_text(
+                json.dumps(
+                    {
+                        "plan": plan.as_dict(),
+                        "analysis": enh.analysis,
+                        "enhanced_tests": outcome.final_tests,
+                        "metrics": metrics,
+                        "repair": {
+                            "iterations": outcome.iterations,
+                            "repaired": outcome.repaired,
+                            "has_run_errors": outcome.has_run_errors,
+                            "has_assertion_failures": outcome.has_assertion_failures,
+                        },
+                        "validation": v.as_dict(),
                     },
-                },
-                indent=2, ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
+                    indent=2, ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
     else:
         print("[6] (sauté : do_enhance=False)")
 
     print(f"=== Terminé. Artefacts dans {out_dir} ===")
-    return out_dir
-
     if container_name:
         docker_runner.stop_container(container_name)
+    return out_dir

@@ -252,7 +252,7 @@ def validate_enhanced_tests(
 
 
 # ===========================================================================
-# Boucle de réparation (étape 4 du prof : « if the test does not run, fix it »)
+# Boucle de réparation ( if the test does not run, fix it )
 # ===========================================================================
 
 @dataclass

@@ -100,7 +100,7 @@ SPECS_SYMPY: dict[str, dict] = {
 SPECS_SYMPY.update({
     k: {
         "python": "3.9",
-        "packages": "requirements.txt",
+        "packages": "mpmath flake8",
         "install": "python -m pip install -e .",
         "pip_packages": ["mpmath==1.3.0", "pytest"],
         "test_cmd": _TEST_SYMPY,

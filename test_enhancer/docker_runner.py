@@ -44,6 +44,7 @@ from .tracer import TraceRow, VariableTracer
 
 # Répertoire du package — contient tracer.py, config.py, runner_inside.py
 TRACER_INJECT_DIR = Path(__file__).parent
+TRACER_INJECT_DIR_PARENT= TRACER_INJECT_DIR.parent
 
 # Dockerfile templates, un par couche
 DOCKERFILE_BASE = TRACER_INJECT_DIR / "Dockerfile.base"
@@ -139,8 +140,8 @@ def _docker_build(dockerfile: Path, tag: str, build_args: dict[str, str],
     if result.returncode != 0:
         runs_path= Path("runs/docker_logs")
         runs_path.mkdir(parents=True, exist_ok=True)
-        stdout_dir= runs_path /"docker_build_stdout.log"
-        stderr_dir= runs_path /"docker_build_stderr.log"
+        stdout_dir= runs_path /"coverage_docker_build_stdout.log"
+        stderr_dir= runs_path /"coverage_docker_build_stderr.log"
         (stdout_dir).write_text(
     result.stdout,
     encoding="utf-8",
@@ -338,6 +339,10 @@ def run_tests_traced_docker(
         shutil.copy(TRACER_INJECT_DIR / "config.py",        tmp_path / "config.py")
         shutil.copy(TRACER_INJECT_DIR / "runner_inside.py", tmp_path / "runner_inside.py")
         shutil.copy(TRACER_INJECT_DIR / "sitecustomize.py", tmp_path / "sitecustomize.py")
+        shutil.copy(TRACER_INJECT_DIR / "loop.py",           tmp_path / "loop.py")
+        shutil.copy(TRACER_INJECT_DIR / "trace_analysis.py", tmp_path / "trace_analysis.py")
+        shutil.copy(TRACER_INJECT_DIR_PARENT / "coverage.py",          tmp_path / "coverage.py")
+
         # 3. Commande shell dans le conteneur (chemins /tracer_inject -> /tmp/tracer_inject)
         def _apply(fname: str) -> str:
             return (
@@ -421,7 +426,7 @@ def run_tests_traced_docker(
             # 5. Copier les fichiers dans le conteneur (sous /tmp/tracer_inject)
             _drun(["docker", "exec", container_name, "mkdir", "-p", "/tmp/tracer_inject"])
             for fname in ("gold.patch", "test.patch", "tracer.py", "config.py",
-                          "runner_inside.py", "sitecustomize.py"):
+                          "runner_inside.py", "sitecustomize.py", "loop.py", "trace_analysis.py"):
                 _drun(["docker", "cp", str(tmp_path / fname),
                        f"{container_name}:/tmp/tracer_inject/{fname}"])
 
@@ -509,7 +514,7 @@ def start_persistent_container(instance: Instance, force_rebuild: bool = False) 
         (tmp_path / "test.patch").write_text(_unix_text(instance.test_patch),
                                               encoding="utf-8", newline="\n")
         for fname in ("gold.patch", "test.patch", "tracer.py", "config.py",
-                      "runner_inside.py", "sitecustomize.py"):
+                      "runner_inside.py", "sitecustomize.py", "loop.py", "trace_analysis.py"):
             src = tmp_path / fname if fname.endswith(".patch") else TRACER_INJECT_DIR / fname
             _drun(["docker", "cp", str(src), f"{container_name}:/tmp/tracer_inject/{fname}"])
 
@@ -525,7 +530,7 @@ def start_persistent_container(instance: Instance, force_rebuild: bool = False) 
         if result.returncode != 0:
             print(f"    [DOCKER] stderr patch: {result.stderr[:500]}",
                   file=sys.stderr, flush=True)
-
+    print(f" [DOCKER] container name before the return statement:{container_name}")
     return container_name
 
 
