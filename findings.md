@@ -25,3 +25,14 @@ generated test (`test_print_function_continuation`) passes for the wrong
 reason (its list entry is ignored; the default mapping prints the expected
 value) while its docstring claims to cover 101->100 — measured coverage
 disproves the claim. Motivates claim-vs-trace verification (Phase 3.3).
+
+**Update (theory-compliance prompts):** with the trace-justification format in
+place, hallucinations become visible and falsifiable. On one iteration the
+planner (a) invented a "closure bug" to explain previous failures (the lambda
+captures nothing; the real cause is the update-indentation defect above), and
+(b) produced a step-by-step justification asserting that a pure-list
+user_functions entry is installed in known_functions — the exact behavior the
+defect prevents. The claimed branches ([100,103], [101,100]) were disproven by
+measured execution: coverage after the iteration is unchanged. Structured
+claims + measurement turn LLM justifications into testable predictions —
+motivating automatic claim-vs-trace verification.
