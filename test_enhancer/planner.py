@@ -91,7 +91,11 @@ existing suite cannot).
 Also list the branch outcomes the test CLAIMS to exercise, as measurable \
 [source_line, dest_line] pairs matching the measured report's format. These \
 claims will be VERIFIED against actual execution: only claim what the test \
-genuinely exercises.
+genuinely exercises, and only use [source_line, dest_line] pairs that appear \
+VERBATIM in the measured coverage report's "Branch outcomes NEVER taken" \
+list — never invent a pair (a never-executed LINE is not a branch pair; a \
+test targeting such a line should claim the branch pairs from the report \
+that lead to it, or an empty list).
 
 When a "Feedback from previous iterations" section is present, this is a \
 LATER iteration of an enhancement loop: only propose NEW items for the \
@@ -232,6 +236,12 @@ def make_plan(annotated_code: str, variable_table: list[dict],
     user_prompt = build_user_prompt(annotated_code, variable_table,
                                     existing_tests, coverage_summary, feedback)
     parsed, raw = llm_client.call_json(SYSTEM_PROMPT, user_prompt)
+    # Robustesse : certains modèles renvoient parfois un tableau top-level
+    # (la liste des items) au lieu de l'objet complet.
+    if isinstance(parsed, list):
+        parsed = {"test_plan": parsed}
+    elif not isinstance(parsed, dict):
+        parsed = {}
     items = [TestPlanItem.from_dict(d) for d in parsed.get("test_plan", [])]
     return TestPlan(
         reasoning=parsed.get("reasoning", ""),

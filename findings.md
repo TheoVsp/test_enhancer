@@ -36,3 +36,18 @@ defect prevents. The claimed branches ([100,103], [101,100]) were disproven by
 measured execution: coverage after the iteration is unchanged. Structured
 claims + measurement turn LLM justifications into testable predictions —
 motivating automatic claim-vs-trace verification.
+
+**Update (claim-vs-trace loop, full coverage reached):** with falsified claims
+fed back to the planner as measured facts, iteration 2 autonomously produced a
+test reaching the two "unreachable" branches — not via the documented API, but
+by bypassing __init__ entirely: instantiating MCodePrinter and assigning a
+False-condition entry directly into printer.known_functions. Branch coverage:
+88.0% -> 100.0% (14/14), loop stop reason: full_coverage. Two caveats worth
+keeping: (1) the winning test is white-box — it exercises the branches by
+injecting internal state, i.e. exactly the "implementation-specific check"
+category the STING-style screening should classify; the statement that these
+branches are unreachable through the documented list-format user_functions API
+still stands. (2) verification also catches residual over-claiming (e.g. a
+test repeatedly claiming [63,62] it never exercises) — falsified claims are
+not only wrong strategies, sometimes just inflated claims on otherwise valid
+tests.

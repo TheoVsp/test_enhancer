@@ -8,9 +8,13 @@ times, 2) check coverage, 3) (good) test fail").
   2. s'arrête si : plus aucun gap (full_coverage), aucun progrès depuis
      l'itération précédente (plateau), ou max_iterations atteint ;
   3. sinon : re-PLANIFIE en ciblant les gaps RESTANTS, avec le feedback de
-     l'itération précédente (tests déjà générés, échecs d'assertion) ;
+     l'itération précédente (tests déjà générés, échecs d'assertion, claims
+     falsifiés) ;
   4. GÉNÈRE de nouveaux tests, les concatène aux précédents, VALIDE le tout
-     (boucle de réparation).
+     (boucle de réparation) ;
+  5. VÉRIFIE les claims (claim-vs-trace) : chaque test est exécuté
+     individuellement sous coverage et ses branches revendiquées sont
+     confrontées aux arcs réellement visités.
 
 Les "good test fails" (tests qui tournent mais échouent sur assertion) sont
 enregistrés à chaque itération : ce sont des détections potentielles de
@@ -22,7 +26,34 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import enhancer, planner, validate
+from . import claims, enhancer, planner, validate
+
+import ast
+import re
+
+
+def _rename_duplicate_tests(existing_code: str, new_code: str, it: int) -> str:
+    """Renomme (suffixe _itN) les fonctions de test du nouveau code dont le
+    nom existe déjà dans le code accumulé — sinon la redéfinition Python
+    écraserait silencieusement les tests des itérations précédentes.
+    Renomme aussi les clés correspondantes dans CLAIMED_BRANCHES."""
+    try:
+        existing_names = {n.name for n in ast.parse(existing_code).body
+                          if isinstance(n, ast.FunctionDef)}
+    except SyntaxError:
+        existing_names = set()
+    try:
+        new_names = [n.name for n in ast.parse(new_code).body
+                     if isinstance(n, ast.FunctionDef)]
+    except SyntaxError:
+        return new_code
+    for name in new_names:
+        if name in existing_names:
+            renamed = f"{name}_it{it}"
+            new_code = re.sub(rf"\bdef {name}\b", f"def {renamed}", new_code)
+            new_code = new_code.replace(f'"{name}"', f'"{renamed}"')
+            new_code = new_code.replace(f"'{name}'", f"'{renamed}'")
+    return new_code
 
 
 @dataclass
@@ -33,6 +64,7 @@ class LoopResult:
     last_plan: "planner.TestPlan | None" = None
     last_enh: "enhancer.EnhancementResult | None" = None
     last_outcome: object = None         # RepairOutcome de validate
+    last_claims: dict | None = None     # rapport claim-vs-trace final
 
 
 def _failed_tests_from_stdout(stdout: str) -> list[str]:
@@ -72,6 +104,7 @@ def run_enhancement_loop(
     combined_tests = ""
     prev_missing: dict | None = None
     last_validation_failures: list[str] = []
+    last_claims_report: dict | None = None
     generated_goals: list[str] = []
     records: list[dict] = []
     plan = None
@@ -123,6 +156,21 @@ def run_enhancement_loop(
                           "was found; do not simply re-propose the same "
                           "strategy):")
                 fb += [f"  - {f}" for f in last_validation_failures]
+            if last_claims_report:
+                falsified = {n: r for n, r in
+                             last_claims_report["tests"].items()
+                             if r["verdict"] == "falsified"}
+                if falsified:
+                    fb.append("CLAIM-VS-TRACE verification results from the "
+                              "previous iteration (MEASURED execution): the "
+                              "following tests claimed branch outcomes they "
+                              "did NOT actually exercise. The strategy did "
+                              "not reach its target — analyse WHY using the "
+                              "code and propose a STRUCTURALLY different "
+                              "approach:")
+                    for n, r in falsified.items():
+                        fb.append(f"  - {n}: claimed {r['claimed']}, "
+                                  f"never taken {r['missing']}")
             fb.append("Only propose NEW test items for the REMAINING measured "
                       "gaps above. If a previous strategy failed to reach its "
                       "target branch, propose a DIFFERENT strategy.")
@@ -165,8 +213,10 @@ def run_enhancement_loop(
                             "missing_branches": missing, "action": "abort"})
             break
 
-        candidate = (combined_tests + "\n\n\n" + enh.enhanced_tests
-                     if combined_tests.strip() else enh.enhanced_tests)
+        new_tests = _rename_duplicate_tests(combined_tests,
+                                            enh.enhanced_tests, it)
+        candidate = (combined_tests + "\n\n\n" + new_tests
+                     if combined_tests.strip() else new_tests)
         outcome = validate.validate_with_repair(
             repo_dir=repo_dir, enhanced_tests=candidate,
             annotated_code=annotated, base_test_path=base_test_path or None,
@@ -178,6 +228,19 @@ def run_enhancement_loop(
               f"{v.n_assertion_fails} échouent (assertion), "
               f"{v.n_run_errors} ne tournent pas")
 
+        # --- 5. Vérification claim-vs-trace -----------------------------
+        (repo_dir / dest_rel).write_text(combined_tests, encoding="utf-8")
+        print(f"    [it {it}] vérification claim-vs-trace...")
+        last_claims_report = claims.verify_claims(
+            repo_dir=repo_dir, test_rel_path=str(dest_rel),
+            test_code=combined_tests, patched_paths=patched_paths)
+        (out_dir / f"claims_iter{it}.json").write_text(
+            json.dumps(last_claims_report, indent=2), encoding="utf-8")
+        print(f"    [it {it}] claims: "
+              f"{last_claims_report['n_verified']} vérifiés, "
+              f"{last_claims_report['n_falsified']} falsifiés, "
+              f"{last_claims_report['n_no_claims']} sans claim")
+
         records.append({
             "iteration": it, "coverage": pct, "missing_branches": missing,
             "n_plan_items": len(plan.items),
@@ -185,6 +248,8 @@ def run_enhancement_loop(
             "n_assertion_fails": v.n_assertion_fails,
             "n_run_errors": v.n_run_errors,
             "good_test_fail_candidates": last_validation_failures,
+            "claims": {n: r["verdict"]
+                       for n, r in last_claims_report["tests"].items()},
             "action": "generated",
         })
 
@@ -193,4 +258,4 @@ def run_enhancement_loop(
                    indent=2), encoding="utf-8")
     return LoopResult(final_tests=combined_tests, stop_reason=stop_reason,
                       records=records, last_plan=plan, last_enh=enh,
-                      last_outcome=outcome)
+                      last_outcome=outcome, last_claims=last_claims_report)

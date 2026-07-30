@@ -48,6 +48,19 @@ TEST STRUCTURE (very important for evaluation):
 - Each test function should focus on ONE behaviour, with a few closely related assertions at most. This way, if one assertion is wrong, only that small test fails instead of hiding all the others.
 - Aim for roughly as many test functions as there are plan items.
 
+CLAIMED BRANCHES DECLARATION (mandatory):
+At the TOP of the module (right after the imports), define a module-level \
+dict named CLAIMED_BRANCHES mapping each test function name to the branch \
+outcomes it exercises, copied from the plan item it realises, e.g.:
+CLAIMED_BRANCHES = {"test_user_functions_string_value": [[62, 63], [63, 64]], \
+"test_print_Sum": []}
+Rules: the dict must be a plain literal (parseable without executing the \
+tests); every test function must appear as a key; only claim branch outcomes \
+the test GENUINELY exercises — the claims are automatically VERIFIED against \
+measured execution, and a false claim flags the test as weak. If a plan \
+item's claimed branches seem unreachable with your inputs, claim only what \
+you are sure of (an empty list is acceptable).
+
 Other rules:
 - Build on the existing tests; do NOT remove existing assertions.
 - Use only the function's public interface unless the existing tests do otherwise.
@@ -75,6 +88,12 @@ def _render_plan(plan: TestPlan) -> str:
         lines.append(f"   technique: {it.technique}")
         lines.append(f"   rationale: {it.rationale}")
         lines.append(f"   inputs: {it.inputs}")
+        if it.claimed_branches:
+            claimed = ", ".join(f"[{a}, {b}]" for a, b in it.claimed_branches)
+            lines.append(f"   claimed branches: {claimed}")
+        if it.trace_justification:
+            lines.append(f"   execution-trace justification: "
+                         f"{it.trace_justification}")
     return "\n".join(lines) if lines else "(empty plan)"
 
 
@@ -105,6 +124,8 @@ def enhance_tests(annotated_code: str, variable_table: list[dict],
     user_prompt = build_user_prompt(annotated_code, variable_table,
                                      existing_tests, plan)
     parsed, raw = llm_client.call_json(SYSTEM_PROMPT, user_prompt)
+    if not isinstance(parsed, dict):
+        parsed = {}
     return EnhancementResult(
         analysis=parsed.get("analysis", ""),
         enhanced_tests=parsed.get("enhanced_tests", ""),
