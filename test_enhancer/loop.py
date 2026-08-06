@@ -93,6 +93,7 @@ def run_enhancement_loop(
     agg_table: list[dict],
     existing_tests: str,
     base_test_path: str,
+    regions: dict | None = None,
     max_iterations: int = 3,
 ) -> LoopResult:
     import coverage_probe          # module racine (cwd = racine du projet)
@@ -119,7 +120,7 @@ def run_enhancement_loop(
             (repo_dir / dest_rel).write_text(combined_tests, encoding="utf-8")
             extra = [str(dest_rel)]
         cov = coverage_probe.measure_on_prepared_repo(
-            repo_dir, node_ids, patched_paths, extra_node=extra, verbose=False)
+            repo_dir, node_ids, patched_paths, regions=regions, extra_node=extra, verbose=False)
         (out_dir / f"coverage_iter{it}.json").write_text(
             json.dumps(cov, indent=2), encoding="utf-8")
 

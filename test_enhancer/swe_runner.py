@@ -193,29 +193,60 @@ def extract_test_files(test_patch: str) -> list[str]:
     return files
 
 
-def resolve_node_ids(test_ids: list[str], test_patch: str) -> list[str]:
+def resolve_node_ids(test_ids: list[str], test_patch: str,
+                     repo_dir: Path | None = None) -> list[str]:
     """Reconstruit des node ids pytest complets.
 
     Les FAIL_TO_PASS de SWE-bench sont parfois des noms de fonction nus
     (ex. 'test_prefix_operations') que pytest ne sait pas localiser. On les
-    préfixe avec le(s) fichier(s) de test extraits du test_patch pour obtenir
-    'chemin/test_file.py::test_prefix_operations'.
+    préfixe avec le(s) fichier(s) de test extraits du test_patch.
+
+    Si repo_dir est fourni, on VÉRIFIE sur le disque que le fichier définit
+    bien la fonction avant de créer la paire — sinon on produirait des node
+    ids inexistants (produit cartésien nom x fichiers), et UN SEUL node id
+    inexistant fait avorter toute la collecte pytest (0 test exécuté, donc
+    couverture silencieusement fausse). Si aucun fichier ne matche, on
+    garde toutes les paires (fallback prudent).
 
     Les ids déjà au format 'fichier.py::test' sont laissés tels quels.
     """
     test_files = extract_test_files(test_patch)
+
+    def file_defines(tf: str, name: str) -> bool | None:
+        """True/False si vérifiable sur le disque, None sinon."""
+        if repo_dir is None:
+            return None
+        p = repo_dir / tf
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        return f"def {name}(" in content
+
     resolved: list[str] = []
     for tid in test_ids:
         if "::" in tid or tid.endswith(".py") or "/" in tid:
-            # déjà un node id exploitable par pytest
-            resolved.append(tid)
+            resolved.append(tid)          # déjà un node id exploitable
             continue
-        if test_files:
-            # nom de fonction nu -> on le cherche dans chaque fichier de test
-            for tf in test_files:
-                resolved.append(f"{tf}::{tid}")
-        else:
-            resolved.append(tid)  # fallback : on laisse pytest se débrouiller
+        if not test_files:
+            resolved.append(tid)          # fallback : pytest se débrouille
+            continue
+        candidates = []
+        verifiable = False
+        for tf in test_files:
+            defines = file_defines(tf, tid)
+            if defines is None:
+                candidates.append(tf)     # invérifiable -> on garde
+            else:
+                verifiable = True
+                if defines:
+                    candidates.append(tf)
+        if verifiable and not candidates:
+            # vérifiable mais trouvé nulle part : on garde tout plutôt que
+            # de perdre le test (cas exotiques : def généré, classe, etc.)
+            candidates = list(test_files)
+        for tf in candidates:
+            resolved.append(f"{tf}::{tid}")
     return resolved
 
 

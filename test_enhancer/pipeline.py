@@ -166,8 +166,8 @@ def run_pipeline(
     # ------------------------------------------------------------------
     # 3. Résoudre les node ids pour les deux suites
     # ------------------------------------------------------------------
-    f2p_ids = swe_runner.resolve_node_ids(instance.fail_to_pass, instance.test_patch)
-    p2p_ids = swe_runner.resolve_node_ids(instance.pass_to_pass,  instance.test_patch)
+    f2p_ids = swe_runner.resolve_node_ids(instance.fail_to_pass, instance.test_patch,repo_dir=repo_dir)
+    p2p_ids = swe_runner.resolve_node_ids(instance.pass_to_pass,  instance.test_patch, repo_dir=repo_dir)
 
     all_tests: list[tuple[str, str]] = (
         [("FAIL_TO_PASS", tid) for tid in f2p_ids]
@@ -282,8 +282,9 @@ def run_pipeline(
             print("[5bis] Mesure de la branch coverage de la suite existante...")
             try:
                 import coverage_probe
+                regions = coverage_probe.patched_regions(repo_dir, patched_paths)
                 cov = coverage_probe.measure_on_prepared_repo(
-                    repo_dir, f2p_ids + p2p_ids, patched_paths)
+                    repo_dir, f2p_ids + p2p_ids, patched_paths, regions=regions)
                 if cov["files"]:
                     coverage_summary = coverage_probe.render_weakness_map(
                         cov, repo_dir)
@@ -310,6 +311,7 @@ def run_pipeline(
             existing_tests=existing_tests,
             base_test_path=base_test_path,
             max_iterations=MAX_ENHANCE_ITERATIONS,
+            regions=regions if not use_docker else None,
         )
         print(f"    -> arrêt: {loop_res.stop_reason} après "
               f"{len(loop_res.records)} itération(s)")
