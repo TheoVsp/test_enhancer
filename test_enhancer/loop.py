@@ -113,6 +113,9 @@ def run_enhancement_loop(
     outcome = None
     stop_reason = "max_iterations"
 
+    suspect_counts: dict[str, int] = {}      # "a->b" -> nb d'échecs à fermer
+    unreachable: set[str] = set()            # branches classées inatteignables
+
     for it in range(1, max_iterations + 1):
         # --- 1. Mesure de l'état courant --------------------------------
         extra = []
@@ -124,21 +127,43 @@ def run_enhancement_loop(
         (out_dir / f"coverage_iter{it}.json").write_text(
             json.dumps(cov, indent=2), encoding="utf-8")
 
-        missing = {f: e["missing_branches"] for f, e in cov["files"].items()}
+        # Les critères d'arrêt portent sur les gaps ACTIONNABLES (région
+        # patchée) quand le scoping est disponible — sinon la boucle
+        # poursuivrait des branches hors périmètre qu'on ne cible pas.
+        missing = {f: e.get("region_missing_branches", e["missing_branches"])
+                   for f, e in cov["files"].items()}
         n_missing = sum(len(v) for v in missing.values())
         pct = {f: e["percent_covered"] for f, e in cov["files"].items()}
-        print(f"    [it {it}] couverture: {pct} | branches manquantes: {n_missing}")
-
+        n_file = sum(len(e["missing_branches"]) for e in cov["files"].values())
+        print(f"    [it {it}] couverture: {pct} | branches manquantes "
+              f"(région patchée): {n_missing}  [fichier entier: {n_file}]")
         # --- 2. Critères d'arrêt ---------------------------------------
+        # Les branches classées inatteignables ne comptent plus comme cibles.
+        actionable = {f: [b for b in v if f"{b[0]}->{b[1]}" not in unreachable]
+                      for f, v in missing.items()}
+        n_actionable = sum(len(v) for v in actionable.values())
+        if unreachable:
+            print(f"    [it {it}] dont {len(unreachable)} branche(s) classée(s) "
+                  f"inatteignable(s) -> {n_actionable} cible(s) restante(s)")
+
         if n_missing == 0:
             stop_reason = "full_coverage"
             records.append({"iteration": it, "coverage": pct,
                             "missing_branches": missing, "action": "stop"})
             break
+        if n_actionable == 0:
+            stop_reason = "unreachable_gaps"
+            records.append({"iteration": it, "coverage": pct,
+                            "missing_branches": missing,
+                            "unreachable": sorted(unreachable),
+                            "action": "stop"})
+            break
         if prev_missing is not None and missing == prev_missing:
             stop_reason = "plateau"
             records.append({"iteration": it, "coverage": pct,
-                            "missing_branches": missing, "action": "stop"})
+                            "missing_branches": missing,
+                            "unreachable": sorted(unreachable),
+                            "action": "stop"})
             break
         prev_missing = missing
 
@@ -241,6 +266,30 @@ def run_enhancement_loop(
               f"{last_claims_report['n_verified']} vérifiés, "
               f"{last_claims_report['n_falsified']} falsifiés, "
               f"{last_claims_report['n_no_claims']} sans claim")
+
+        # --- 5bis. Détection des gaps inatteignables --------------------
+        # Une branche ciblée par un test qui a RÉELLEMENT tourné mais qui
+        # reste ouverte est suspecte ; suspecte 2 fois -> inatteignable
+        # (typiquement du code mort : cf. sympy-20154, garde en amont qui
+        # rend un bloc `if n == 0:` inaccessible).
+        targeted = {f"{b[0]}->{b[1]}"
+                    for item in plan.items for b in item.claimed_branches}
+        cov_after = coverage_probe.measure_on_prepared_repo(
+            repo_dir, node_ids, patched_paths, regions=regions,
+            extra_node=[str(dest_rel)], verbose=False)
+        still_missing = set()
+        for f, e in cov_after["files"].items():
+            for b in e.get("region_missing_branches", e["missing_branches"]):
+                still_missing.add(f"{b[0]}->{b[1]}")
+        for key in targeted & still_missing:
+            suspect_counts[key] = suspect_counts.get(key, 0) + 1
+            if suspect_counts[key] >= 1:
+                unreachable.add(key)
+        newly = {k for k in targeted & still_missing
+                 if suspect_counts.get(k, 0) >= 2} - (unreachable - unreachable)
+        if newly:
+            print(f"    [it {it}] branches suspectées inatteignables: "
+                  f"{sorted(newly)}")
 
         records.append({
             "iteration": it, "coverage": pct, "missing_branches": missing,

@@ -51,3 +51,48 @@ still stands. (2) verification also catches residual over-claiming (e.g. a
 test repeatedly claiming [63,62] it never exercises) — falsified claims are
 not only wrong strategies, sometimes just inflated claims on otherwise valid
 tests.
+
+## sympy__sympy-20154 — dead code in the gold patch (unreachable branch)
+
+**Found by:** measured-coverage loop, stopped on plateau after 2 iterations
+with 3 branches never closed.
+
+**Finding.** In `partitions()` (sympy/utilities/iterables.py), the gold patch
+adds an early guard at line 1754 (`if (n <= 0 or ...): yield {} ; return`)
+while the pre-existing block at lines 1772-1777 (`if n == 0: yield {0: 1}`)
+is left in place. The guard intercepts every `n == 0` call, so lines
+1772-1777 are UNREACHABLE dead code. Verified: `list(partitions(0))` returns
+`[{}]`, and the branch 1772->1773 is never taken under any test.
+
+**Why this matters methodologically.** Three generated tests failed here, but
+they were NOT hallucinations: each predicted `{0: 1}` — the correct reading of
+the code at 1772-1777. The tests are right about the source and wrong about
+the behavior, because the source itself is unreachable. Coverage-driven
+generation therefore surfaces dead code as a *persistent* gap: the loop's
+plateau is the diagnostic signal.
+
+**Consequence for the pipeline:** unreachable gaps should be detected and
+excluded from the loop's targets, rather than consuming iterations.
+
+## sympy__sympy-20154 — dead code in the gold patch (unreachable branches)
+
+**Found by:** measured-coverage loop, stop reason `unreachable_gaps` after 2
+iterations; 3 targeted branches never closed despite 4 generated tests that
+executed correctly.
+
+**Finding.** In `partitions()` (sympy/utilities/iterables.py), the patched
+code adds an early guard at line 1754 (`if (n <= 0 or ...): yield {} ;
+return`) while the pre-existing block at lines 1772-1777 (`if n == 0: yield
+{0: 1}`) remains in place. The guard intercepts every `n == 0` call, so lines
+1772-1777 are unreachable dead code. Verified: `list(partitions(0))` returns
+`[{}]`, and branch 1772->1773 is never taken under any test.
+
+**Why the generated tests "failed" without being wrong.** Each test predicted
+`{0: 1}` — the correct reading of the source at 1772-1777. They are right
+about the code and wrong about the behaviour, because that code cannot run.
+Coverage-driven generation therefore surfaces dead code as a persistent gap.
+
+**Pipeline consequence.** Branches targeted by a test that runs but stay
+uncovered are now classified as unreachable and dropped from the loop's
+targets; when none remain, the loop stops with `unreachable_gaps` instead of
+burning further LLM iterations.

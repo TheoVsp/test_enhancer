@@ -36,8 +36,14 @@ def _run(cmd: list[str], cwd: Path, extra_env: dict | None = None):
     env["PYTHONIOENCODING"] = "utf-8"
     if extra_env:
         env.update(extra_env)
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", env=env)
+    print(f"      [_run] cwd={cwd}")
+    print(f"      [_run] COVERAGE_FILE={env.get('COVERAGE_FILE')}")
+    print(f"      [_run] cmd[:8]={cmd[:8]}")
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", env=env)
+    print(f"      [_run] -> rc={r.returncode} "
+          f"len(out)={len(r.stdout)} len(err)={len(r.stderr)}")
+    return r
 
 
 def _patched_paths(patch_text: str) -> list[str]:
@@ -140,10 +146,12 @@ def measure_on_prepared_repo(repo_dir: Path, node_ids: list[str],
         print(f"    pytest: {tail}")
     if not re.search(r"\d+ (passed|failed)", r.stdout):
         raise RuntimeError(
-            "pytest n'a exécuté aucun test (pas de 'N passed/failed' dans la "
-            "sortie) — la couverture mesurée serait celle de l'import, pas "
-            "des tests. Dernières lignes pytest :\n"
-            + "\n".join(r.stdout.strip().splitlines()[-15:]))    
+            "pytest n'a exécuté aucun test (pas de 'N passed/failed').\n"
+            f"--- CMD node_ids ({len(node_ids)}): {node_ids[:3]}...\n"
+            f"--- extra_node: {extra_node}\n"
+            f"--- RETURNCODE: {r.returncode}\n"
+            f"--- STDOUT (complet) ---\n{r.stdout}\n"
+            f"--- STDERR (complet) ---\n{r.stderr}")   
     if not Path(cov_file).exists():
         raise RuntimeError(
             f"{cov_file} jamais créé — coverage n'a pas tourné.\n"
@@ -235,6 +243,28 @@ def render_weakness_map(result: dict, repo_dir: Path) -> str:
                                f"without entering the block")
                 else:
                     out.append(f"  - line {a} ({src(a)}) -> line {b} ({src(b)})")
+            # Contexte source autour des gaps : sur les gros fichiers, une
+            # ligne isolée ne suffit pas au LLM pour comprendre la sémantique
+            # de la branche (il devine, et il devine mal).
+            anchors = sorted({a for a, _ in miss_branches}
+                             | {b for _, b in miss_branches if b > 0}
+                             | set(miss_lines))
+            blocks: list[tuple[int, int]] = []
+            for n in anchors:
+                lo, hi = max(1, n - 6), n + 6
+                if blocks and lo <= blocks[-1][1] + 2:
+                    blocks[-1] = (blocks[-1][0], max(blocks[-1][1], hi))
+                else:
+                    blocks.append((lo, hi))
+            out.append("")
+            out.append("SOURCE CONTEXT around the gaps (>>> marks a line "
+                       "involved in a missing branch or never executed):")
+            gap_lines = set(anchors)
+            for lo, hi in blocks:
+                out.append(f"  --- lines {lo}-{min(hi, len(src_lines))} ---")
+                for n in range(lo, min(hi, len(src_lines)) + 1):
+                    mark = ">>>" if n in gap_lines else "   "
+                    out.append(f"  {mark} {n:5d}| {src_lines[n - 1]}")
         else:
             out.append("Branch outcomes never taken (in scope): none")
 

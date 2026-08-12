@@ -62,22 +62,35 @@ def write_table_csv(table: list[dict], out_path: Path) -> Path:
     return out_path
 
 
-def write_table_xlsx(table: list[dict], out_path: Path) -> Path | None:
-    """Écrit le tableau en Excel si openpyxl est installé, sinon None."""
-    try:
-        from openpyxl import Workbook
-    except ImportError:
-        return None
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "variable_trace"
-    headers = ["step", "function", "lineno", "event", "variable", "value"]
-    ws.append(headers)
-    for entry in table:
-        ws.append([entry[h] for h in headers])
+# Au-delà de ce nombre de lignes, on n'écrit PAS de xlsx : openpyxl construit
+# le workbook entièrement en RAM (MemoryError observé à ~136k lignes sur
+# sympy-20154). Le CSV, lui, est écrit en streaming et reste complet.
+XLSX_MAX_ROWS = 20000
+
+
+def write_table_xlsx(table: list[dict], out_path) -> bool:
+    """Écrit la variable table en xlsx, en mode streaming (write_only).
+
+    Renvoie True si le fichier a été écrit, False s'il a été sauté parce que
+    la table est trop grosse (le CSV complet reste la source de vérité).
+    """
+    from pathlib import Path
+    out_path = Path(out_path)
+
+    if len(table) > XLSX_MAX_ROWS:
+        print(f"    [i] xlsx sauté ({len(table)} lignes > {XLSX_MAX_ROWS}) — "
+              f"le CSV complet reste disponible")
+        return False
+
+    from openpyxl import Workbook
+    wb = Workbook(write_only=True)      # streaming : pas tout en RAM
+    ws = wb.create_sheet("variables")
+    cols = ["step", "function", "lineno", "event", "variable", "value"]
+    ws.append(cols)
+    for row in table:
+        ws.append([row.get(c, "") for c in cols])
     wb.save(out_path)
-    return out_path
+    return True
 
 
 def annotate_source(

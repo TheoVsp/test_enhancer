@@ -238,7 +238,8 @@ def run_pipeline(
     print("[5] Construction des artefacts agrégés (tous tests)...")
     agg_table = artifacts.build_variable_table(all_rows)
     artifacts.write_table_csv(agg_table, out_dir / "variable_table.csv")
-    artifacts.write_table_xlsx(agg_table, out_dir / "variable_table.xlsx")
+    if not artifacts.write_table_xlsx(agg_table, out_dir / "variable_table.xlsx"):
+        pass  # trop volumineux : le CSV complet suffit
 
     # Re-annotate the patched source file using ALL rows aggregated
     traced_files_all = sorted({r.filename for r in all_rows})
@@ -278,11 +279,13 @@ def run_pipeline(
 
         # --- 5bis. Weakness map mesurée (coverage.py) ---------------------
         coverage_summary = None
+        regions = None
         if not use_docker:
             print("[5bis] Mesure de la branch coverage de la suite existante...")
             try:
                 import coverage_probe
-                regions = coverage_probe.patched_regions(repo_dir, patched_paths)
+                regions = coverage_probe.patched_regions(
+                    repo_dir, instance.gold_patch)
                 cov = coverage_probe.measure_on_prepared_repo(
                     repo_dir, f2p_ids + p2p_ids, patched_paths, regions=regions)
                 if cov["files"]:
@@ -290,10 +293,12 @@ def run_pipeline(
                         cov, repo_dir)
                     (out_dir / "coverage_baseline.json").write_text(
                         json.dumps(cov, indent=2), encoding="utf-8")
-                    n_miss = sum(len(e["missing_branches"])
-                                 for e in cov["files"].values())
-                    print(f"    -> {n_miss} branche(s) jamais prise(s) — "
-                          "weakness map injectée dans le planner")
+                    n_miss = sum(
+                        len(e.get("region_missing_branches",
+                                  e["missing_branches"]))
+                        for e in cov["files"].values())
+                    print(f"    -> {n_miss} branche(s) jamais prise(s) "
+                          "(région patchée) — weakness map injectée")
                 else:
                     print("    [!] aucun fichier patché mesuré — planner sans mesure")
             except Exception as exc:
@@ -311,7 +316,7 @@ def run_pipeline(
             existing_tests=existing_tests,
             base_test_path=base_test_path,
             max_iterations=MAX_ENHANCE_ITERATIONS,
-            regions=regions if not use_docker else None,
+            regions=regions,
         )
         print(f"    -> arrêt: {loop_res.stop_reason} après "
               f"{len(loop_res.records)} itération(s)")
