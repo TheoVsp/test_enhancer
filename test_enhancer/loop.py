@@ -281,9 +281,21 @@ def run_enhancement_loop(
         for f, e in cov_after["files"].items():
             for b in e.get("region_missing_branches", e["missing_branches"]):
                 still_missing.add(f"{b[0]}->{b[1]}")
+        # Une branche ciblée par un test qui a RÉELLEMENT tourné ET PASSÉ
+        # mais qui reste ouverte est très probablement inatteignable
+        # (code mort). Si le test a échoué, sa stratégie peut simplement
+        # être mauvaise : on laisse une seconde chance.
+        passed_tests = {n for n, r in last_claims_report["tests"].items()
+                        if r.get("passed")}
+        targeted_by_passing = set()
+        for n in passed_tests:
+            for b in last_claims_report["tests"][n].get("claimed", []):
+                targeted_by_passing.add(f"{b[0]}->{b[1]}")
+
         for key in targeted & still_missing:
+            threshold = 1 if key in targeted_by_passing else 2
             suspect_counts[key] = suspect_counts.get(key, 0) + 1
-            if suspect_counts[key] >= 1:
+            if suspect_counts[key] >= threshold:
                 unreachable.add(key)
         newly = {k for k in targeted & still_missing
                  if suspect_counts.get(k, 0) >= 2} - (unreachable - unreachable)

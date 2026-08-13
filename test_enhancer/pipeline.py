@@ -24,6 +24,8 @@ Produit, dans runs/<instance_id>/ :
 """
 from __future__ import annotations
 
+import time
+import os
 import json
 import re
 from pathlib import Path
@@ -179,6 +181,13 @@ def run_pipeline(
     # ------------------------------------------------------------------
     # 4. Boucle par test — trace + artefacts individuels
     # ------------------------------------------------------------------
+    # Budget de temps global pour le tracing : certaines instances (solvers,
+    # simplify) ont des suites si lentes que sys.settrace les rend
+    # inexploitables (plusieurs heures). Au-delà du budget, on arrête de
+    # tracer — la weakness map mesurée reste disponible et suffit au planner.
+    TRACE_BUDGET_S = float(os.environ.get("TE_TRACE_BUDGET_S", "600"))
+    _trace_t0 = time.time()
+    _trace_skipped = 0
     all_rows: list[TraceRow] = []
     summary: list[dict] = []
     aggregated_annotated_main = ""
@@ -188,6 +197,9 @@ def run_pipeline(
         safe_name = _safe_dir_name(test_id)
         test_dir = traces_dir / safe_name
         print(f"    [{idx}/{len(all_tests)}] {suite}  {test_id}")
+        if time.time() - _trace_t0 > TRACE_BUDGET_S:
+            _trace_skipped += 1
+            continue
 
         if use_docker:
             result = docker_runner.run_single_test_traced_docker(
@@ -200,7 +212,6 @@ def run_pipeline(
                 repo_dir, test_id,
                 target_files=patched_paths,
             )
-
         rows = result.tracer.rows if result.tracer else []
         print(f"        success={result.success}  trace_rows={len(rows)}")
 
@@ -229,6 +240,9 @@ def run_pipeline(
     (traces_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    if _trace_skipped:
+                print(f"    [!] {_trace_skipped} test(s) non tracé(s) — budget de "
+                  f"{TRACE_BUDGET_S:.0f}s dépassé (weakness map mesurée non affectée)")   
     print(f"    -> résumé écrit : traces/summary.json  "
           f"({len(all_rows)} lignes de trace au total)")
 

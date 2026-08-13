@@ -96,3 +96,21 @@ Coverage-driven generation therefore surfaces dead code as a persistent gap.
 uncovered are now classified as unreachable and dropped from the loop's
 targets; when none remain, the loop stops with `unreachable_gaps` instead of
 burning further LLM iterations.
+
+## sympy__sympy-21379 — unreachable branches in Mod.doit (dead compat code)
+
+**Found by:** measured-coverage loop, stop reason `unreachable_gaps`; 5
+generated tests all passed, none reached its claimed branch.
+
+**Finding.** Four branch outcomes in `Mod.eval`'s `doit()` are unreachable:
+`81->89` requires `int(r)` to succeed yet `isinstance(d, int)` to be false,
+which cannot happen on Python 3 (a Python 2 `long` leftover); `96->103`,
+`98->103` and `101->103` require sign combinations that `Mod` short-circuits
+earlier. Confirmed by measurement across the whole existing suite plus five
+targeted tests.
+
+**Note on the heuristic.** A branch is classified unreachable when a test that
+targets it runs and passes without covering it. When the targeting test fails,
+a second iteration is required before classifying — a failing test may simply
+have a wrong strategy (cf. sympy-15345, where iteration 2 found a working
+approach).
