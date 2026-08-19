@@ -95,7 +95,10 @@ genuinely exercises, and only use [source_line, dest_line] pairs that appear \
 VERBATIM in the measured coverage report's "Branch outcomes NEVER taken" \
 list — never invent a pair (a never-executed LINE is not a branch pair; a \
 test targeting such a line should claim the branch pairs from the report \
-that lead to it, or an empty list).
+that lead to it, or an empty list). Prefer claiming FEWER branches you are confident about over many uncertain \
+ones: an empty list is better than a wrong claim. In particular, do not claim \
+arcs whose destination is far from the source line (loop exits, function \
+exits) unless the code makes that jump obvious.
 
 When a "Feedback from previous iterations" section is present, this is a \
 LATER iteration of an enhancement loop: only propose NEW items for the \
@@ -146,6 +149,12 @@ class TestPlanItem:
 
     @classmethod
     def from_dict(cls, d: dict) -> "TestPlanItem":
+        # Robustesse : certains modèles renvoient un item sous forme de liste
+        # ou de chaîne au lieu d'un objet.
+        if not isinstance(d, dict):
+            if isinstance(d, str):
+                return cls(goal=d, technique="", rationale="", inputs="")
+            return cls(goal="", technique="", rationale="", inputs="")
         branches = []
         for b in d.get("claimed_branches", []) or []:
             try:
@@ -243,6 +252,7 @@ def make_plan(annotated_code: str, variable_table: list[dict],
     elif not isinstance(parsed, dict):
         parsed = {}
     items = [TestPlanItem.from_dict(d) for d in parsed.get("test_plan", [])]
+    items = [it for it in items if it.goal.strip()]
     return TestPlan(
         reasoning=parsed.get("reasoning", ""),
         items=items,

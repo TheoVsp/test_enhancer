@@ -336,6 +336,12 @@ def run_pipeline(
               f"{len(loop_res.records)} itération(s)")
 
         if not loop_res.final_tests.strip():
+            if loop_res.stop_reason in ("full_coverage", "unreachable_gaps"):
+                # Rien à combler dès le départ : la suite existante couvre
+                # déjà toute la région patchée (ou les gaps sont morts).
+                print(f"    -> aucun test généré : {loop_res.stop_reason} "
+                      "dès la première mesure (rien à combler)")
+                return
             raise RuntimeError(
                 "Boucle d'enrichissement terminée sans aucun test généré "
                 f"(raison: {loop_res.stop_reason}). Voir {out_dir}/llm_raw.")
